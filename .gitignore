@@ -1,0 +1,27 @@
+# 빌드 산출물 (make clean 으로 전부 지워진다)
+build/
+*.o
+*.d
+*.dSYM/
+
+# 실행 산출물
+*.log
+/core
+core.*
+
+# 에디터
+*~
+*.swp
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Claude Code 개인 설정
+.claude/settings.local.json
+.claude/hooks/
+CLAUDE.md
+
+# Superpowers 작업 공간
+.superpowers/
