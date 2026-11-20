@@ -10,8 +10,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "cgi.h"
 #include "conn.h"
 #include "log.h"
+#include "router.h"
 #include "server.h"
 #include "static.h"
 #include "threadpool.h"
@@ -32,7 +34,7 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "사용법: %s [-H host] [-p port] [-r root] [-w workers] [-q queue]\n"
-            "          [-t idle_timeout_ms] [-m max_requests] [-v]\n"
+            "          [-t idle_timeout_ms] [-m max_requests] [-g cgi_dir] [-c cgi_timeout_ms] [-v]\n"
             "  -H  바인드 주소 (기본 0.0.0.0)\n"
             "  -p  포트 (기본 8080)\n"
             "  -r  문서 루트 (기본 ./www)\n"
@@ -40,6 +42,8 @@ static void usage(const char *prog)
             "  -q  대기 큐 길이 (기본 64, 가득 차면 503)\n"
             "  -t  유휴 타임아웃 ms (기본 5000)\n"
             "  -m  연결당 최대 요청 수 (기본 100)\n"
+            "  -g  CGI 디렉터리: /cgi-bin/<이름> 을 여기서 실행 (없으면 CGI 비활성)\n"
+            "  -c  CGI 타임아웃 ms (기본 5000, 초과 시 504)\n"
             "  -v  디버그 로그\n",
             prog);
 }
@@ -77,7 +81,12 @@ static int install_signals(void)
 
 int main(int argc, char **argv)
 {
-    static static_ctx_t sctx; /* PATH_MAX 배열을 담으므로 스택 대신 정적 저장소 */
+    /* PATH_MAX 배열을 담으므로 스택 대신 정적 저장소. 시작 시 한 번 쓰고 이후 읽기 전용 */
+    static static_ctx_t sctx;
+    static cgi_ctx_t cctx;
+    static router_t router;
+    const char *cgi_dir = NULL;
+    long cgi_ms = CGI_DEFAULT_TIMEOUT_MS;
     const http_limits_t default_limits = HTTP_LIMITS_DEFAULT;
     const char *host = "0.0.0.0";
     const char *root = "./www";
@@ -89,7 +98,7 @@ int main(int argc, char **argv)
     threadpool_t *tp = NULL;
     conn_config_t ccfg;
 
-    while ((opt = getopt(argc, argv, "H:p:r:w:q:t:m:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "H:p:r:w:q:t:m:g:c:vh")) != -1) {
         int bad = 0;
 
         switch (opt) {
@@ -100,6 +109,8 @@ int main(int argc, char **argv)
         case 'q': bad = parse_long(optarg, 1, 65536, &queue); break;
         case 't': bad = parse_long(optarg, 1, 3600 * 1000, &idle_ms); break;
         case 'm': bad = parse_long(optarg, 1, 1000000, &max_req); break;
+        case 'g': cgi_dir = optarg; break;
+        case 'c': bad = parse_long(optarg, 1, 3600 * 1000, &cgi_ms); break;
         case 'v': verbose = 1; break;
         default: usage(argv[0]); return opt == 'h' ? 0 : 2;
         }
@@ -119,6 +130,18 @@ int main(int argc, char **argv)
         log_msg(LOG_ERROR, "문서 루트를 열 수 없음: '%s' (%s)", root, strerror(errno));
         return 1;
     }
+    /* 라우팅: /cgi-bin/ → CGI, 나머지 → 정적 파일 */
+    router_init(&router, static_handle, &sctx);
+    if (cgi_dir != NULL) {
+        if (cgi_init(&cctx, cgi_dir, "/cgi-bin", (int)cgi_ms) != 0) {
+            log_msg(LOG_ERROR, "CGI 디렉터리를 열 수 없음: '%s' (%s)", cgi_dir, strerror(errno));
+            return 1;
+        }
+        if (cctx.dir_len > sctx.root_len && strncmp(cctx.dir, sctx.root, sctx.root_len) == 0 &&
+            cctx.dir[sctx.root_len] == '/')
+            log_msg(LOG_WARN, "CGI 디렉터리가 문서 루트 안에 있다: 실행 파일이 정적 파일로 노출될 수 있음");
+        router_add(&router, "/cgi-bin", cgi_handle, &cctx);
+    }
 
     lfd = server_listen(host, (int)port, 128);
     if (lfd < 0)
@@ -129,8 +152,8 @@ int main(int argc, char **argv)
     ccfg.idle_timeout_ms = (int)idle_ms;
     ccfg.send_timeout_ms = 10000;
     ccfg.max_requests = (int)max_req;
-    ccfg.handler = static_handle;
-    ccfg.handler_ctx = &sctx;
+    ccfg.handler = router_handle;
+    ccfg.handler_ctx = &router;
     ccfg.stop = &g_stop;
 
     tp = threadpool_create((size_t)workers, (size_t)queue, conn_worker, &ccfg);
@@ -141,6 +164,8 @@ int main(int argc, char **argv)
 
     log_msg(LOG_INFO, "listening on http://%s:%ld  root=%s  workers=%ld queue=%ld idle=%ldms", host,
             port, sctx.root, workers, queue, idle_ms);
+    if (cgi_dir != NULL)
+        log_msg(LOG_INFO, "CGI: /cgi-bin/ -> %s (timeout %ldms)", cctx.dir, cgi_ms);
     rc = server_run(lfd, tp, &g_stop) == 0 ? 0 : 1;
     log_msg(LOG_INFO, "종료 시작 (signal)");
 

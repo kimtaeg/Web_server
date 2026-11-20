@@ -15,8 +15,16 @@ for t in "$@"; do
     echo "[$name]"
     "$t" &
     pid=$!
-    # 워치독: 출력을 /dev/null 로 돌려서, 남은 sleep 이 파이프를 붙잡지 않게 한다
-    ( sleep "$limit"; kill -TERM "$pid" ) >/dev/null 2>&1 &
+    # 워치독: 시간 초과 시 죽이기 직전에 스택을 남긴다 (멈춤 원인 분석용).
+    # 출력은 파일로만 보내서, 남은 sleep 이 make 의 파이프를 붙잡지 않게 한다.
+    stackfile="${TMPDIR:-/tmp}/cweb-hang-$name-$$.txt"
+    (
+        sleep "$limit"
+        if command -v sample >/dev/null; then sample "$pid" 1 >"$stackfile" 2>&1
+        elif command -v gdb >/dev/null; then gdb -batch -ex 'thread apply all bt' -p "$pid" >"$stackfile" 2>&1
+        fi
+        kill -TERM "$pid"
+    ) >/dev/null 2>&1 &
     wd=$!
     wait "$pid"
     rc=$?
@@ -28,6 +36,10 @@ for t in "$@"; do
     else
         if [ "$rc" -eq 143 ]; then
             echo "  !! $name: ${limit}초 안에 끝나지 않아 강제 종료 (멈춤 의심)"
+            if [ -s "$stackfile" ]; then
+                echo "  !! 멈춘 시점의 스택 (테스트·소스 프레임만, 전체: $stackfile):"
+                grep -E 'test_|src/|\.c:[0-9]+' "$stackfile" | head -30 | sed 's/^/     /'
+            fi
         elif [ "$rc" -gt 128 ]; then
             echo "  !! $name: 시그널 $((rc - 128)) 로 비정상 종료"
         fi

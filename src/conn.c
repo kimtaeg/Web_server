@@ -97,6 +97,7 @@ void conn_handle(int fd, const conn_config_t *cfg)
 {
     char tmp[RECV_CHUNK];
     char ip[INET6_ADDRSTRLEN];
+    conn_info_t ci;
     http_parser_t parser;
     http_request_t req;
     buf_t in;
@@ -106,6 +107,7 @@ void conn_handle(int fd, const conn_config_t *cfg)
                  2 * RECV_CHUNK;
 
     peer_ip(fd, ip, sizeof ip);
+    ci.ip = ip;
     if (buf_init(&in, 4096, cap) != BUF_OK)
         goto cleanup;
     if (cfg->send_timeout_ms > 0)
@@ -147,7 +149,7 @@ void conn_handle(int fd, const conn_config_t *cfg)
         ka = req.keep_alive && nreq < cfg->max_requests && !stopping(cfg);
         memset(&res, 0, sizeof res);
         t0 = now_ms();
-        if (cfg->handler(cfg->handler_ctx, fd, &req, ka, &res) != 0)
+        if (cfg->handler(cfg->handler_ctx, fd, &req, &ci, ka, &res) != 0)
             res.close = 1;
         log_access(ip, http_method_name(req.method), req.target, req.target_len, req.version_minor,
                    res.status, res.bytes, now_ms() - t0);

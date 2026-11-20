@@ -239,7 +239,11 @@ static int serve(const char *raw, buf_t *out, handler_result_t *res)
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
         return -101;
     memset(res, 0, sizeof *res);
-    rc = static_handle(&sctx, sv[0], &req, 1, res);
+    {
+        conn_info_t ci = {"127.0.0.1"};
+
+        rc = static_handle(&sctx, sv[0], &req, &ci, 1, res);
+    }
     close(sv[0]);
     buf_reset(out);
     while ((n = recv_some(sv[1], tmp, sizeof tmp, 1000)) > 0)

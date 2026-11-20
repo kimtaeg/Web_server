@@ -19,12 +19,14 @@
 #include "netio.h"
 
 /* 응답 본문 = 요청 경로. */
-static int echo_handler(void *ctx, int fd, const http_request_t *req, int ka, handler_result_t *res)
+static int echo_handler(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci, int ka,
+                        handler_result_t *res)
 {
     buf_t b;
     int rc = 0;
 
     (void)ctx;
+    (void)ci;
     buf_init(&b, 0, 4096);
     http_response_head(&b, 200, "text/plain", req->path_len, ka, NULL);
     buf_append(&b, req->path, req->path_len);
