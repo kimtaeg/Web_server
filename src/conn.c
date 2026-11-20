@@ -35,13 +35,13 @@ static int stopping(const conn_config_t *cfg)
 }
 
 /*
- * idle_timeout_ms 안에 데이터가 오면 받는다. 한 번에 길게 기다리지 않고 STOP_CHECK_MS 단위로
+ * timeout_ms 안에 데이터가 오면 받는다. 한 번에 길게 기다리지 않고 STOP_CHECK_MS 단위로
  * 나눠 기다리며 종료 플래그를 확인한다 → 종료 시 유휴 연결을 기다리느라 늦어지지 않는다.
  * 반환은 recv_some 과 같다 (타임아웃·종료는 NETIO_TIMEOUT).
  */
-static ssize_t wait_recv(int fd, char *tmp, size_t n, const conn_config_t *cfg)
+static ssize_t wait_recv(int fd, char *tmp, size_t n, const conn_config_t *cfg, long timeout_ms)
 {
-    long deadline = now_ms() + cfg->idle_timeout_ms;
+    long deadline = now_ms() + timeout_ms;
 
     for (;;) {
         long left = deadline - now_ms();
@@ -118,15 +118,38 @@ void conn_handle(int fd, const conn_config_t *cfg)
         size_t used = 0;
         int ka;
         long t0;
+        long req_start;
         handler_result_t res;
 
         /* 버퍼에 이미 다음 요청이 있으면(파이프라이닝) recv 없이 바로 파싱된다. */
         http_parser_init(&parser, &cfg->limits);
+        req_start = in.len > 0 ? now_ms() : -1; /* 이 요청의 첫 바이트가 도착한 시각 */
         while ((r = http_parse(&parser, in.data, in.len, &req, &used)) == PARSE_NEED_MORE) {
-            ssize_t n = wait_recv(fd, tmp, sizeof tmp, cfg);
+            long wait = cfg->idle_timeout_ms;
+            int header_clock = req_start >= 0 && cfg->header_timeout_ms > 0 &&
+                               !http_parser_headers_done(&parser);
+            ssize_t n;
 
+            if (header_clock) { /* 헤더 마감까지 남은 시간이 더 짧으면 그만큼만 기다린다 */
+                long left = req_start + cfg->header_timeout_ms - now_ms();
+
+                if (left < wait)
+                    wait = left;
+            }
+            n = wait > 0 ? wait_recv(fd, tmp, sizeof tmp, cfg, wait) : NETIO_TIMEOUT;
+            if (n == NETIO_TIMEOUT && header_clock && !stopping(cfg) &&
+                now_ms() - req_start >= cfg->header_timeout_ms) {
+                size_t sent = 0;
+
+                /* slowloris: 헤더를 마감 안에 다 보내지 못함 → 408 후 종료 */
+                http_response_status_page(fd, 408, 0, 0, NULL, &sent);
+                log_access(ip, NULL, NULL, 0, 0, 408, sent, now_ms() - req_start);
+                goto cleanup;
+            }
             if (n <= 0) /* EOF, 오류, 유휴 타임아웃, 종료 */
                 goto cleanup;
+            if (req_start < 0)
+                req_start = now_ms();
             if (buf_append(&in, tmp, (size_t)n) != BUF_OK) {
                 size_t sent;
 

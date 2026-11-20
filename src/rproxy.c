@@ -87,6 +87,16 @@ void rproxy_mark_down(rproxy_pool_t *p, size_t i, long long now_ms)
     atomic_store(&p->backends[i].down_until_ms, now_ms + p->down_ms);
 }
 
+static int reply_x(int fd, int status, int ka, int head, const char *extra, handler_result_t *res)
+{
+    size_t sent = 0;
+    int rc = http_response_status_page(fd, status, ka, head, extra, &sent);
+
+    res->status = status;
+    res->bytes = sent;
+    return rc;
+}
+
 static int reply(int fd, int status, int ka, int head, handler_result_t *res)
 {
     size_t sent = 0;
@@ -134,6 +144,10 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         ufd = upstream_connect((const struct sockaddr *)&b->addr, b->addrlen, p->connect_timeout_ms);
         if (ufd >= 0)
             break;
+        if (ufd == UPSTREAM_ELOCAL) { /* 우리 쪽 자원 부족: down 표시도 재시도도 하지 않는다 */
+            log_msg(LOG_WARN, "rproxy: 로컬 자원 부족(임시 포트/fd)으로 %s 연결 불가 → 503", b->name);
+            break;
+        }
         rproxy_mark_down(p, (size_t)idx, rproxy_now_ms());
         log_msg(LOG_WARN, "rproxy: 백엔드 %s 연결 %s → %llds 동안 down", b->name,
                 ufd == UPSTREAM_ETIMEOUT ? "타임아웃" : "실패", p->down_ms / 1000);
@@ -141,6 +155,10 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         idx = rproxy_pick(p, rproxy_now_ms(), prev);
         if (idx < 0)
             break;
+    }
+    if (ufd == UPSTREAM_ELOCAL) {
+        rc = reply_x(fd, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
+        goto cleanup;
     }
     if (ufd < 0) {
         rc = reply(fd, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, res);

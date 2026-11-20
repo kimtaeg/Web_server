@@ -1,0 +1,55 @@
+# CI: Linux 와 macOS 에서 빌드·단위 테스트·ASan·기능 테스트·누수 검사, Linux 에서 valgrind.
+# 부하 테스트는 넣지 않는다: 공용 러너는 측정값 편차가 커서 의미가 없다 (docs/benchmark.md 는 로컬 측정).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 의존 도구 (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd lsof curl gdb
+
+      - name: 컴파일러 정보
+        run: cc --version && make --version | head -1
+
+      - name: make (release) — -k 로 모든 컴파일 오류를 한 번에 표시
+        run: make -k
+
+      - name: make test
+        run: make -k test
+
+      - name: make asan (ASan + UBSan 단위 테스트)
+        run: make asan
+
+      - name: make func (기능 테스트)
+        run: make func
+
+      - name: make func-asan (기능 테스트를 ASan 서버로)
+        run: make func-asan
+
+      - name: make leakcheck (Linux LSan / macOS leaks)
+        run: make leakcheck
+
+  valgrind:
+    name: valgrind (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: 의존 도구
+        run: sudo apt-get update && sudo apt-get install -y valgrind netcat-openbsd lsof curl
+      - name: make valgrind
+        run: make valgrind

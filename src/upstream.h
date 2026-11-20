@@ -35,6 +35,13 @@
 #define UPSTREAM_EBAD (-3)     /* 응답 형식 오류·헤더 전 EOF, 아직 아무것도 안 보냄 → 502 */
 #define UPSTREAM_EPARTIAL (-4) /* 응답 일부를 보낸 뒤 업스트림 실패 → 클라이언트 연결 종료 */
 #define UPSTREAM_ECLIENT (-5)  /* 클라이언트로 보내기 실패 → 연결 종료 */
+/*
+ * 프록시 자신의 자원 부족(임시 포트 고갈, fd 고갈 등)으로 연결 시도조차 못 함 → 503.
+ * 백엔드 잘못이 아니므로 down 으로 표시하지 않고, 다른 백엔드로 재시도하지도 않는다(같은 이유로 실패).
+ * 실측: 업스트림 커넥션 풀이 없어 요청마다 새 연결 → TIME_WAIT 가 임시 포트(macOS 16384개)를 다 쓰면
+ * connect 가 EADDRNOTAVAIL. 이를 백엔드 장애로 처리하면 순간 포트 부족이 10초짜리 전체 502 가 된다.
+ */
+#define UPSTREAM_ELOCAL (-6)
 
 #define UPSTREAM_MAX_HEAD (64 * 1024)
 #define UPSTREAM_MAX_RESP_HEADERS 100
@@ -76,6 +83,9 @@ typedef struct {
 
 int upstream_is_hop_by_hop(const char *name, size_t n);
 
+/* connect/socket 의 errno 가 "우리 쪽 자원 부족"인가 (EADDRNOTAVAIL, EMFILE, ENFILE, ENOBUFS, EAGAIN) */
+int upstream_is_local_error(int err);
+
 /*
  * Via 표식. 인스턴스마다 다른 값("1.1 cweb-<id>")을 쓰면, 들어온 요청의 Via 에 자기 표식이 있을 때
  * "내가 보낸 요청이 나에게 돌아왔다" = 프록시 루프임을 알 수 있다 (→ 508).
@@ -98,7 +108,7 @@ int upstream_parse_response_head(const char *p, size_t n, upstream_resp_t *r);
 
 /* ---- I/O ---- */
 
-/* 연결된 blocking fd(CLOEXEC, SIGPIPE 방어 적용) 또는 UPSTREAM_ECONN / UPSTREAM_ETIMEOUT. */
+/* 연결된 blocking fd(CLOEXEC, SIGPIPE 방어 적용) 또는 UPSTREAM_ECONN / ETIMEOUT / ELOCAL. */
 int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms);
 
 /*

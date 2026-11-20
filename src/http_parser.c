@@ -539,6 +539,11 @@ parse_result_t http_parse(http_parser_t *p, const char *data, size_t len, http_r
     }
 }
 
+int http_parser_headers_done(const http_parser_t *p)
+{
+    return p->state == S_BODY || p->state == S_DONE;
+}
+
 int http_parser_error_status(const http_parser_t *p)
 {
     return p->state == S_ERROR ? p->error_status : 0;

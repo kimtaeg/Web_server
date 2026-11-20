@@ -236,7 +236,7 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
 
     (void)ci;
     buf_init(&extra, 0, 16 * 1024);
-    buf_init(&head, 0, 4096);
+    buf_init(&head, 0, 4096 + STATIC_IO_BUF); /* 헤더 + 본문 첫 조각 */
 
     status = resolve(s, req, real, &extra);
     if (status == 200) {
@@ -262,6 +262,31 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         goto cleanup;
     }
     res->status = 200;
+    if (!is_head && remaining > 0) {
+        /*
+         * 본문 첫 조각을 헤더와 같은 버퍼에 담아 send 한 번으로 보낸다 (작은 파일은 응답 전체가 한 번에).
+         * 헤더와 본문을 작은 write 두 번으로 나누면 Nagle + 지연 ACK 때문에 두 번째 조각이 수십 ms
+         * 늦게 나가는 경우가 있다 (wrk -c1 측정에서 p99 49ms 로 확인됨).
+         */
+        size_t want = remaining < STATIC_IO_BUF ? remaining : STATIC_IO_BUF;
+        ssize_t r;
+
+        io = malloc(STATIC_IO_BUF);
+        if (io == NULL) {
+            rc = send_status(fd, 500, keep_alive, is_head, &extra, res);
+            goto cleanup;
+        }
+        do {
+            r = read(file, io, want);
+        } while (r < 0 && errno == EINTR);
+        if (r <= 0 || buf_append(&head, io, (size_t)r) != BUF_OK) {
+            /* 아직 아무것도 안 보냈으므로 오류 응답을 보낼 수 있다 */
+            buf_reset(&head);
+            rc = send_status(fd, 500, keep_alive, is_head, &extra, res);
+            goto cleanup;
+        }
+        remaining -= (size_t)r;
+    }
     if (send_all(fd, head.data, head.len) < 0) {
         rc = -1;
         goto cleanup;
@@ -270,12 +295,7 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     if (is_head)
         goto cleanup;
 
-    /* 고정 버퍼로 read → send_all 반복: 파일 크기와 무관하게 메모리 사용이 일정하다. */
-    io = malloc(STATIC_IO_BUF);
-    if (io == NULL) {
-        rc = -1; /* 헤더를 이미 보냈으므로 오류 페이지를 보낼 수 없다 → 연결 종료 */
-        goto cleanup;
-    }
+    /* 나머지는 고정 버퍼로 read → send_all 반복: 파일 크기와 무관하게 메모리 사용이 일정하다. */
     while (remaining > 0) {
         size_t want = remaining < STATIC_IO_BUF ? remaining : STATIC_IO_BUF;
         ssize_t r = read(file, io, want);

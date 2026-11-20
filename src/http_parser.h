@@ -126,6 +126,9 @@ void http_parser_init(http_parser_t *p, const http_limits_t *lim);
 parse_result_t http_parse(http_parser_t *p, const char *data, size_t len, http_request_t *req,
                           size_t *consumed);
 
+/* 헤더를 다 받았는가 (본문 대기 중이거나 완료). slowloris 방어의 "헤더 마감" 판단용. */
+int http_parser_headers_done(const http_parser_t *p);
+
 /* PARSE_ERROR 일 때의 HTTP 상태 코드 (400/411/413/414/431/501/505). 아니면 0. */
 int http_parser_error_status(const http_parser_t *p);
 

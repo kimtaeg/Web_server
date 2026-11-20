@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdint.h>
 #include <string.h>
@@ -143,6 +144,12 @@ int server_run(int lfd, threadpool_t *tp, volatile sig_atomic_t *stop)
          * CGI 가 끝날 때까지 연결이 닫히지 않는다. (accept4 는 POSIX 가 아니라 macOS 에 없어서
          * accept 직후 fcntl 로 건다. 그 사이 다른 스레드가 fork 하는 아주 짧은 창은 남는다.)
          */
+        {
+            /* 응답은 이미 한 번의 send 로 모아 보내므로, 작은 조각을 모으는 Nagle 은 지연만 더한다 */
+            int one = 1;
+
+            (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        }
         if (fcntl(cfd, F_SETFD, FD_CLOEXEC) != 0 || platform_sock_init(cfd) != 0) {
             close(cfd);
             continue;

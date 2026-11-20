@@ -22,6 +22,7 @@ void config_defaults(config_t *c)
     c->workers = 8;
     c->queue = 64;
     c->idle_timeout_ms = 5000;
+    c->header_timeout_ms = 10000;
     c->max_requests = 100;
     c->cgi_timeout_ms = 5000;
     c->upstream_connect_timeout_ms = 1000;
@@ -98,6 +99,7 @@ static const struct {
     {"workers", offsetof(config_t, workers), 1, 1024},
     {"queue", offsetof(config_t, queue), 1, 65536},
     {"idle_timeout_ms", offsetof(config_t, idle_timeout_ms), 1, 3600000},
+    {"header_timeout_ms", offsetof(config_t, header_timeout_ms), 0, 3600000},
     {"max_requests", offsetof(config_t, max_requests), 1, 1000000},
     {"cgi_timeout_ms", offsetof(config_t, cgi_timeout_ms), 1, 3600000},
     {"upstream_connect_timeout_ms", offsetof(config_t, upstream_connect_timeout_ms), 1, 600000},
