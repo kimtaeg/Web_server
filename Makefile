@@ -39,7 +39,7 @@ LDLIBS := -pthread
 
 # 구현이 끝난 모듈만 나열한다. 빈 모듈은 -pedantic 에서 "빈 번역 단위" 오류가 나므로
 # 각 단계에서 구현할 때 여기에 추가한다.
-MODULES := buf
+MODULES := buf http_parser mime
 
 BUILD     := build/$(MODE)
 LIB_OBJS  := $(patsubst %,$(BUILD)/obj/%.o,$(MODULES))
