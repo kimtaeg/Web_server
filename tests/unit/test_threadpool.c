@@ -166,11 +166,50 @@ static void test_destroy_releases_waiter(void)
     CHECK_EQ_INT(done, w.rc == 0 ? 3 : 2);
 }
 
+/* 종료 순서: close 는 블록하지 않고, 이후 submit 은 거부, 큐에 남은 작업은 join 전에 처리된다. */
+static void test_close_then_join(void)
+{
+    threadpool_t *tp;
+
+    reset(0);
+    tp = threadpool_create(1, 4, job, NULL);
+    REQUIRE(tp != NULL);
+    threadpool_try_submit(tp, 1);
+    wait_started(1);
+    threadpool_try_submit(tp, 2);
+    threadpool_try_submit(tp, 3);
+
+    threadpool_close(tp); /* 워커가 게이트에 막혀 있어도 즉시 돌아와야 한다 */
+    CHECK_EQ_INT(threadpool_try_submit(tp, 4), -1);
+    CHECK_EQ_INT(threadpool_submit_wait(tp, 5), -1);
+    threadpool_close(tp); /* 멱등 */
+
+    open_gate();
+    threadpool_join_free(tp);
+    CHECK_EQ_INT(done, 3); /* 진행 중(1) + 큐에 있던 것(2, 3) 모두 처리, 닫힌 뒤 것(4, 5)은 거부 */
+    CHECK(sum == 1 + 2 + 3);
+}
+
+/* close 를 빠뜨리고 join_free 만 불러도 영원히 멈추지 않는다. */
+static void test_join_free_without_close(void)
+{
+    threadpool_t *tp;
+
+    reset(1);
+    tp = threadpool_create(2, 4, job, NULL);
+    REQUIRE(tp != NULL);
+    threadpool_try_submit(tp, 7);
+    threadpool_join_free(tp);
+    CHECK_EQ_INT(done, 1);
+}
+
 int main(void)
 {
     RUN_TEST(test_all_jobs_run);
     RUN_TEST(test_invalid_args);
     RUN_TEST(test_full_queue);
     RUN_TEST(test_destroy_releases_waiter);
+    RUN_TEST(test_close_then_join);
+    RUN_TEST(test_join_free_without_close);
     TEST_END();
 }

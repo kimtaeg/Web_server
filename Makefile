@@ -4,6 +4,7 @@
 #   make test        : 단위 테스트 빌드 + 실행 (debug 설정)
 #   make asan        : ASan + UBSan 으로 바이너리와 단위 테스트를 빌드하고 테스트 실행
 #   make func        : 기능 테스트 (서버를 띄우고 curl 로 검증, tests/func/*.sh)
+#   make leakcheck   : 서버 실행 → 요청 → SIGINT → 누수 0 확인
 #   make clean       : build/ 삭제
 #
 # 모드마다 build/<mode>/ 에 따로 빌드한다. 같은 .o 를 다른 플래그로 섞어 링크하는 사고를 막기 위해서다.
@@ -49,7 +50,7 @@ BIN       := $(BUILD)/webserver
 TEST_SRCS := $(wildcard tests/unit/test_*.c)
 TEST_BINS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRCS))
 
-.PHONY: all debug asan test func clean bin unit unit-run
+.PHONY: all debug asan test func leakcheck clean bin unit unit-run
 
 all: bin
 
@@ -61,6 +62,12 @@ test:
 
 asan:
 	@$(MAKE) --no-print-directory MODE=asan bin unit-run SAN=1
+
+# 누수 검사: 서버 실행 → 요청 → SIGINT → 누수 보고 (Linux: LSan, macOS: leaks + ASan)
+leakcheck:
+	@$(MAKE) --no-print-directory MODE=asan bin
+	@$(MAKE) --no-print-directory MODE=debug bin
+	@bash tests/leak/leakcheck.sh build/asan/webserver build/debug/webserver
 
 # 기능 테스트: 실제 서버를 띄우고 curl 로 검증 (포트와 curl 이 필요해서 test 와 분리)
 func: bin

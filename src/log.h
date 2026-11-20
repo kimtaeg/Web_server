@@ -19,8 +19,14 @@ void log_init(log_level_t min_level, FILE *out);
 
 void log_msg(log_level_t lvl, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
-/* "GET /index.html 200 1234B 3ms" 형식의 접근 로그 (INFO). target 은 길면 잘라서 기록. */
-void log_access(const char *method, const char *target, size_t target_len, int status,
-                size_t bytes, long ms);
+/*
+ * 접근 로그 (INFO). 한 요청 = 한 줄:
+ *   2026-11-20 14:03:11.204 [INFO] 127.0.0.1 "GET /a.txt HTTP/1.1" 200 245B 1ms
+ *   (시간)                          (IP)      (요청줄)               (상태)(바이트)(처리시간)
+ * method 가 NULL 이면 요청줄을 "-" 로 쓴다 (파싱 오류로 요청줄을 알 수 없는 경우).
+ * target 은 LOG_TARGET_MAX 바이트를 넘으면 잘라서 "..." 를 붙인다.
+ */
+void log_access(const char *ip, const char *method, const char *target, size_t target_len,
+                int version_minor, int status, size_t bytes, long ms);
 
 #endif /* LOG_H */

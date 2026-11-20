@@ -138,10 +138,8 @@ int threadpool_submit_wait(threadpool_t *tp, int item)
     return rc;
 }
 
-void threadpool_destroy(threadpool_t *tp)
+void threadpool_close(threadpool_t *tp)
 {
-    size_t i;
-
     if (tp == NULL)
         return;
     pthread_mutex_lock(&tp->mu);
@@ -149,7 +147,21 @@ void threadpool_destroy(threadpool_t *tp)
     pthread_cond_broadcast(&tp->not_empty); /* 자고 있는 워커 전부: 남은 일 처리 후 종료 */
     pthread_cond_broadcast(&tp->not_full);  /* submit_wait 대기자: -1 로 빠져나감 */
     pthread_mutex_unlock(&tp->mu);
+}
 
+void threadpool_destroy(threadpool_t *tp)
+{
+    threadpool_close(tp);
+    threadpool_join_free(tp);
+}
+
+void threadpool_join_free(threadpool_t *tp)
+{
+    size_t i;
+
+    if (tp == NULL)
+        return;
+    threadpool_close(tp); /* 멱등. close 를 빠뜨리고 불러도 워커가 끝나지 않아 영원히 join 하는 일이 없게 */
     for (i = 0; i < tp->nthreads; i++)
         pthread_join(tp->threads[i], NULL);
 

@@ -34,9 +34,19 @@ int threadpool_try_submit(threadpool_t *tp, int item);
 int threadpool_submit_wait(threadpool_t *tp, int item);
 
 /*
- * 새 작업을 더 받지 않고, 큐에 이미 들어온 작업은 모두 처리한 뒤 워커를 join 하고 해제한다.
- * (받아 둔 연결을 버리지 않는 graceful shutdown)
+ * graceful shutdown 은 두 단계로 나뉜다 (main 의 종료 순서가 코드에 그대로 드러나도록):
+ *
+ * 1) threadpool_close: 큐를 닫는다. 이후 submit 은 모두 -1.
+ *    잠든 워커를 전부 깨운다(not_empty broadcast). 워커는 진행 중인 작업과 큐에 이미 들어온
+ *    작업을 끝까지 처리한 뒤, 큐가 비면 스스로 종료한다. submit_wait 대기자도 깨워 -1 로 돌려보낸다.
+ *    블록하지 않고 바로 돌아온다.
+ * 2) threadpool_join_free: 모든 워커가 끝날 때까지 join 한 뒤 큐·동기화 객체·풀을 해제한다.
+ *    (안전장치로 내부에서 close 도 한 번 더 부른다. close 는 멱등.)
  */
+void threadpool_close(threadpool_t *tp);
+void threadpool_join_free(threadpool_t *tp);
+
+/* threadpool_close + threadpool_join_free. NULL 이면 아무것도 하지 않는다. */
 void threadpool_destroy(threadpool_t *tp);
 
 #endif /* THREADPOOL_H */
