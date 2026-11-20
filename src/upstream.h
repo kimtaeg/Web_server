@@ -38,7 +38,7 @@
 
 #define UPSTREAM_MAX_HEAD (64 * 1024)
 #define UPSTREAM_MAX_RESP_HEADERS 100
-#define UPSTREAM_VIA "1.1 cweb"
+#define UPSTREAM_VIA_DEFAULT "1.1 cweb"
 
 typedef struct {
     int status;
@@ -52,6 +52,20 @@ typedef struct {
     size_t val_off[UPSTREAM_MAX_RESP_HEADERS], val_len[UPSTREAM_MAX_RESP_HEADERS];
 } upstream_resp_t;
 
+/*
+ * 캐시용 응답 사본. upstream_relay 가 클라이언트로 흘려보내면서 같은 바이트를 여기에도 쌓는다.
+ *   head : 클라이언트에 보낸 상태줄+헤더 중 Connection 과 extra_headers 를 뺀 것 (빈 줄 없음)
+ *   body : 본문. body.max 를 넘으면 더 쌓지 않고 overflow = 1
+ *   complete : 응답을 Content-Length 만큼 정확히 다 받았고 overflow 가 없음 → 저장해도 되는 사본
+ */
+typedef struct {
+    buf_t head;
+    buf_t body;
+    int status;
+    int overflow;
+    int complete;
+} upstream_capture_t;
+
 typedef struct {
     int status;            /* 백엔드 응답 상태 (로그용) */
     size_t bytes;          /* 클라이언트로 보낸 바이트 */
@@ -61,6 +75,16 @@ typedef struct {
 /* ---- 순수 함수 (단위 테스트 대상) ---- */
 
 int upstream_is_hop_by_hop(const char *name, size_t n);
+
+/*
+ * Via 표식. 인스턴스마다 다른 값("1.1 cweb-<id>")을 쓰면, 들어온 요청의 Via 에 자기 표식이 있을 때
+ * "내가 보낸 요청이 나에게 돌아왔다" = 프록시 루프임을 알 수 있다 (→ 508).
+ * 고정 문자열이면 cweb 앞에 cweb 을 둔 정상 체인까지 루프로 오판한다.
+ * 동기화: main 이 워커를 만들기 전에 한 번만 설정, 이후 읽기 전용. 설정 안 하면 UPSTREAM_VIA_DEFAULT.
+ */
+void upstream_set_via(const char *via);
+const char *upstream_via(void);
+int upstream_request_has_our_via(const http_request_t *req);
 
 /*
  * 업스트림으로 보낼 요청 전체(요청줄 + 재작성한 헤더 + 본문)를 out 에 만든다.
@@ -77,8 +101,13 @@ int upstream_parse_response_head(const char *p, size_t n, upstream_resp_t *r);
 /* 연결된 blocking fd(CLOEXEC, SIGPIPE 방어 적용) 또는 UPSTREAM_ECONN / UPSTREAM_ETIMEOUT. */
 int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms);
 
-/* 요청은 이미 보냈다고 가정하고 ufd 의 응답을 cfd 로 중계한다. 반환 UPSTREAM_*. */
+/*
+ * 요청은 이미 보냈다고 가정하고 ufd 의 응답을 cfd 로 중계한다. 반환 UPSTREAM_*.
+ * extra_headers: 클라이언트 응답 헤더에 덧붙일 줄들 ("X-Cache: MISS\r\n"), NULL 가능.
+ * cap: NULL 이 아니면 응답 사본을 쌓는다 (호출자가 head/body 를 buf_init 해 둘 것).
+ */
 int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_alive,
-                   int read_timeout_ms, upstream_result_t *res);
+                   int read_timeout_ms, const char *extra_headers, upstream_capture_t *cap,
+                   upstream_result_t *res);
 
 #endif /* UPSTREAM_H */

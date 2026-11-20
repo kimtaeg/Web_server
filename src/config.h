@@ -12,6 +12,10 @@
  *   upstream_down_secs          10
  *   route    /api              127.0.0.1:9001 127.0.0.1:9002   # 경로 접두사 규칙
  *   route    host=api.local /  127.0.0.1:9003                  # Host 헤더 규칙
+ *   forward_proxy on|off                  # absolute-form 요청을 포워드 프록시로 (기본 off)
+ *   cache_max_bytes 67108864              # 포워드 프록시 캐시 전체 상한 (0 = 캐시 끔)
+ *   cache_max_object_bytes 1048576        # 객체 하나 상한
+ *   cache_default_ttl_secs 60             # Cache-Control max-age 가 없을 때의 TTL
  *
  * 오류는 "line 7: unknown directive 'rout'" 처럼 줄 번호와 함께 err 에 쓴다.
  * 동기화: 시작 시 main 스레드에서만 읽고 쓴다. 이후 서버는 여기서 만든 값을 복사해 쓴다.
@@ -52,6 +56,10 @@ typedef struct {
     long upstream_connect_timeout_ms;
     long upstream_read_timeout_ms;
     long upstream_down_secs;
+    int forward_proxy;
+    long cache_max_bytes;
+    long cache_max_object_bytes;
+    long cache_default_ttl_secs;
     config_route_t routes[CONFIG_MAX_ROUTES];
     size_t nroutes;
 } config_t;

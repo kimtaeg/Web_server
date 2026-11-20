@@ -250,7 +250,7 @@ static void relay(const char *req_raw, const char *backend, int close_backend, i
     send_all(up[0], backend, strlen(backend));
     if (close_backend)
         shutdown(up[0], SHUT_WR); /* 백엔드 EOF */
-    o->rc = upstream_relay(up[1], cl[0], &req, 1, timeout_ms, &o->res);
+    o->rc = upstream_relay(up[1], cl[0], &req, 1, timeout_ms, NULL, NULL, &o->res);
     close(cl[0]);
     buf_init(&o->client, 0, 1 << 20);
     while ((n = recv_some(cl[1], tmp, sizeof tmp, 500)) > 0)
@@ -380,6 +380,82 @@ static void test_relay_errors(void)
     buf_free(&o.client);
 }
 
+/* Via 표식과 루프 감지: 인스턴스 표식이 정확히 일치하는 항목이 있을 때만 루프 */
+static void test_via_loop_detection(void)
+{
+    http_request_t req;
+    buf_t out;
+
+    upstream_set_via("1.1 cweb-abc");
+    REQUIRE(parse_req("GET / HTTP/1.1\r\nHost: h\r\n\r\n", &req) == 0);
+    buf_init(&out, 0, 4096);
+    upstream_build_request(&out, &req, "/", 1, NULL, "1.2.3.4");
+    CHECK(strstr(out.data, "Via: 1.1 cweb-abc\r\n") != NULL);
+    buf_free(&out);
+    CHECK_EQ_INT(upstream_request_has_our_via(&req), 0);
+
+    REQUIRE(parse_req("GET / HTTP/1.1\r\nHost: h\r\nVia: 1.0 edge, 1.1 cweb-abc\r\n\r\n", &req) == 0);
+    CHECK_EQ_INT(upstream_request_has_our_via(&req), 1);
+    REQUIRE(parse_req("GET / HTTP/1.1\r\nHost: h\r\nVia: 1.1 cweb-other\r\n\r\n", &req) == 0);
+    CHECK_EQ_INT(upstream_request_has_our_via(&req), 0); /* 다른 cweb 인스턴스는 정상 체인 */
+    REQUIRE(parse_req("GET / HTTP/1.1\r\nHost: h\r\nVia: 1.1 cweb-abcd\r\n\r\n", &req) == 0);
+    CHECK_EQ_INT(upstream_request_has_our_via(&req), 0); /* 접두사 일치만으로는 아님 */
+    upstream_set_via(NULL);
+    CHECK_EQ_STR(upstream_via(), UPSTREAM_VIA_DEFAULT);
+}
+
+/* capture: 클라이언트로 보낸 것과 같은 head/body 사본. Connection·extra 는 사본에 없음. */
+static void test_relay_capture(void)
+{
+    http_request_t req;
+    int up[2], cl[2];
+    upstream_capture_t cap;
+    upstream_result_t res;
+    char tmp[4096];
+    ssize_t n;
+    buf_t client;
+    const char *backend = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-App: 1\r\n\r\nhello";
+
+    parse_req(GET, &req);
+    socketpair(AF_UNIX, SOCK_STREAM, 0, up);
+    socketpair(AF_UNIX, SOCK_STREAM, 0, cl);
+    send_all(up[0], backend, strlen(backend));
+    memset(&cap, 0, sizeof cap);
+    buf_init(&cap.head, 0, 4096);
+    buf_init(&cap.body, 0, 4096);
+    CHECK_EQ_INT(upstream_relay(up[1], cl[0], &req, 1, 2000, "X-Cache: MISS\r\n", &cap, &res),
+                 UPSTREAM_OK);
+    close(cl[0]);
+    buf_init(&client, 0, 1 << 16);
+    while ((n = recv_some(cl[1], tmp, sizeof tmp, 500)) > 0)
+        buf_append(&client, tmp, (size_t)n);
+    CHECK(strstr(client.data, "X-Cache: MISS\r\n") != NULL); /* 클라이언트에는 있음 */
+    CHECK(cap.complete);
+    CHECK_EQ_INT(cap.status, 200);
+    CHECK_EQ_STR(cap.head.data, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-App: 1\r\n");
+    CHECK_EQ_SIZE(cap.body.len, 5);
+    CHECK_EQ_MEM(cap.body.data, "hello", 5);
+    buf_free(&client);
+    buf_free(&cap.head);
+    buf_free(&cap.body);
+    close(cl[1]);
+    close(up[0]);
+    close(up[1]);
+
+    /* 본문이 사본 상한보다 크면 complete = 0 (중계 자체는 정상) */
+    socketpair(AF_UNIX, SOCK_STREAM, 0, up);
+    socketpair(AF_UNIX, SOCK_STREAM, 0, cl);
+    send_all(up[0], backend, strlen(backend));
+    memset(&cap, 0, sizeof cap);
+    buf_init(&cap.head, 0, 4096);
+    buf_init(&cap.body, 0, 3);
+    CHECK_EQ_INT(upstream_relay(up[1], cl[0], &req, 1, 2000, NULL, &cap, &res), UPSTREAM_OK);
+    CHECK(cap.overflow && !cap.complete);
+    buf_free(&cap.head);
+    buf_free(&cap.body);
+    close(cl[0]); close(cl[1]); close(up[0]); close(up[1]);
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -392,5 +468,7 @@ int main(void)
     RUN_TEST(test_relay_chunked);
     RUN_TEST(test_relay_no_body_cases);
     RUN_TEST(test_relay_errors);
+    RUN_TEST(test_via_loop_detection);
+    RUN_TEST(test_relay_capture);
     TEST_END();
 }

@@ -27,6 +27,10 @@ void config_defaults(config_t *c)
     c->upstream_connect_timeout_ms = 1000;
     c->upstream_read_timeout_ms = 5000;
     c->upstream_down_secs = 10;
+    c->forward_proxy = 0; /* open proxy 방지: 명시적으로 켜야 한다 */
+    c->cache_max_bytes = 64L * 1024 * 1024;
+    c->cache_max_object_bytes = 1024L * 1024;
+    c->cache_default_ttl_secs = 60;
 }
 
 int config_parse_hostport(const char *s, config_hostport_t *out)
@@ -99,6 +103,9 @@ static const struct {
     {"upstream_connect_timeout_ms", offsetof(config_t, upstream_connect_timeout_ms), 1, 600000},
     {"upstream_read_timeout_ms", offsetof(config_t, upstream_read_timeout_ms), 1, 3600000},
     {"upstream_down_secs", offsetof(config_t, upstream_down_secs), 0, 86400},
+    {"cache_max_bytes", offsetof(config_t, cache_max_bytes), 0, 16L * 1024 * 1024 * 1024},
+    {"cache_max_object_bytes", offsetof(config_t, cache_max_object_bytes), 1, 1024L * 1024 * 1024},
+    {"cache_default_ttl_secs", offsetof(config_t, cache_default_ttl_secs), 0, 365L * 86400},
 };
 
 /* 토큰들로 지시어 하나를 처리. 오류면 메시지를 쓰고 -1. */
@@ -132,6 +139,14 @@ static int apply(config_t *c, char **tok, int nt, char *msg, size_t msz)
             return -1;
         }
         c->listen_port = hp.port;
+        return 0;
+    }
+    if (strcmp(tok[0], "forward_proxy") == 0) {
+        if (nt != 2 || (strcmp(tok[1], "on") != 0 && strcmp(tok[1], "off") != 0)) {
+            snprintf(msg, msz, "forward_proxy 는 on 또는 off");
+            return -1;
+        }
+        c->forward_proxy = strcmp(tok[1], "on") == 0;
         return 0;
     }
     if (strcmp(tok[0], "root") == 0) {

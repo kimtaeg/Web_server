@@ -41,6 +41,12 @@ int router_add_host(router_t *r, const char *host, const char *prefix, conn_hand
     return 0;
 }
 
+void router_set_absolute_handler(router_t *r, conn_handler_fn fn, void *ctx)
+{
+    r->absolute = fn;
+    r->absolute_ctx = ctx;
+}
+
 int router_add(router_t *r, const char *prefix, conn_handler_fn fn, void *ctx)
 {
     return router_add_host(r, NULL, prefix, fn, ctx);
@@ -93,6 +99,8 @@ int router_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     const char *host = http_header_get(req, "Host", &hl);
     const route_t *rt;
 
+    if (req->is_absolute && r->absolute != NULL)
+        return r->absolute(r->absolute_ctx, fd, req, ci, keep_alive, res);
     if (host == NULL && req->is_absolute) { /* absolute-form 이면 authority 가 Host 역할 */
         host = req->authority;
         hl = req->authority_len;

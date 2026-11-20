@@ -28,7 +28,11 @@ upstream_read_timeout_ms 1000
 upstream_down_secs 1
 route /api  127.0.0.1:$SPAWN_PORT
 route /dead 127.0.0.1:1 127.0.0.1:2
+forward_proxy on
+cache_max_bytes 100000
+cache_max_object_bytes 50000
 EOF
+BACKEND_PORT=$SPAWN_PORT
 
 # 서버가 처리하는 거의 모든 경로를 한 번씩 밟는다 (정상/오류/keep-alive/중간 끊김).
 traffic() {
@@ -49,6 +53,10 @@ traffic() {
     curl -s -o /dev/null -o /dev/null "$(url /api/)" "$(url /api/)"                         # 프록시 keep-alive
     curl -s -o /dev/null "$(url /dead)"                                                     # 연결 실패 → 재시도 → 502
     curl -s -o /dev/null "$(url /dead)"                                                     # 전부 down → 즉시 502
+    curl -s -o /dev/null -x "127.0.0.1:$PORT" "http://127.0.0.1:$BACKEND_PORT/"            # fproxy MISS → 저장
+    curl -s -o /dev/null -x "127.0.0.1:$PORT" "http://127.0.0.1:$BACKEND_PORT/"            # fproxy HIT
+    curl -s -o /dev/null -x "127.0.0.1:$PORT" -I "http://127.0.0.1:$BACKEND_PORT/"         # fproxy HEAD HIT
+    curl -s -o /dev/null -x "127.0.0.1:$PORT" "http://127.0.0.1:1/"                        # fproxy 502
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"; printf 'GET / HTTP/1.1\r\nHo' >&5; exec 5>&-     # 중간 끊김
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"                                                    # 유휴 연결을 연 채로
     sleep 0.3                                                                             # SIGINT 를 맞게 한다
@@ -99,7 +107,7 @@ else
 fi
 traffic
 finish_run
-grep -E "종료 [0-9]/4" "$SERVER_LOG"
+grep -E "종료 [0-9]/4|cache: hits" "$SERVER_LOG"
 check "ASan: 종료 코드 0" 0 "$RUN_RC"
 if grep -qE "ERROR: (AddressSanitizer|LeakSanitizer)|runtime error:" "$SERVER_LOG"; then
     grep -E -A5 "ERROR: |runtime error:" "$SERVER_LOG" | head -30
@@ -108,5 +116,5 @@ else
     check "ASan: 오류 보고 없음" none none
 fi
 echo "--- 접근 로그 일부 ---"
-grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin|/api|/dead| "GET / ' | head -14
+grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin|/api|/dead|http://| "GET / ' | head -20
 finish
