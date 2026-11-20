@@ -9,6 +9,8 @@ int main(void)
     static const char *const names[] = {
         "REQUEST_METHOD", "QUERY_STRING", "CONTENT_LENGTH", "CONTENT_TYPE", "SCRIPT_NAME",
         "SERVER_PROTOCOL", "REMOTE_ADDR", "GATEWAY_INTERFACE", "SERVER_SOFTWARE",
+        "HTTP_HOST", "HTTP_X_FORWARDED_FOR", "HTTP_X_FORWARDED_PROTO", "HTTP_VIA", "HTTP_CONNECTION",
+        "HTTP_PROXY",
     };
     size_t i;
 

@@ -5,6 +5,7 @@
  */
 #include "cgi.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -25,7 +26,7 @@
 #define CGI_IO_CHUNK 16384
 #define CGI_MAX_HEADERS_BYTES (64 * 1024)
 #define CGI_REAP_POLL_MS 5
-#define CGI_ENV_MAX 16
+#define CGI_ENV_MAX (16 + HTTP_MAX_HEADERS) /* 고정 변수 + 요청 헤더마다 HTTP_* 하나 */
 
 /* ------------------------------------------------------------------ */
 /* 순수 함수                                                           */
@@ -402,6 +403,44 @@ static int build_env(buf_t *store, char *envp[CGI_ENV_MAX], const http_request_t
         ENV_ADD("CONTENT_LENGTH=%zu", req->content_length);
     if (ct != NULL)
         ENV_ADD("CONTENT_TYPE=%.*s", (int)ct_len, ct);
+
+    /*
+     * 요청 헤더 → HTTP_<이름> (RFC 3875 4.1.18): 대문자, '-' → '_'.
+     * - Content-Length/Content-Type 은 위의 전용 변수로 이미 넘겼다.
+     * - "Proxy" 헤더는 넘기지 않는다 (httpoxy, CVE-2016-5385): HTTP_PROXY 가 생기면
+     *   CGI 안의 HTTP 클라이언트 라이브러리가 그것을 "프록시 설정"으로 읽어 공격자 서버로 요청을 보낸다.
+     * - 이름에 [A-Za-z0-9-] 외 문자가 있으면 건너뛴다: '_' 와 '-' 가 같은 변수로 합쳐져
+     *   다른 헤더를 덮어쓰는 혼동을 막는다.
+     */
+    for (i = 0; i < req->header_count; i++) {
+        const http_header_t *h = &req->headers[i];
+        size_t k;
+        int ok = 1;
+
+        if (span_ieq(h->name, h->name_len, "content-length") ||
+            span_ieq(h->name, h->name_len, "content-type") || span_ieq(h->name, h->name_len, "proxy"))
+            continue;
+        for (k = 0; k < h->name_len && ok; k++) {
+            char c = h->name[k];
+
+            ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+        }
+        if (!ok || n >= CGI_ENV_MAX - 1)
+            continue;
+        offs[n++] = store->len;
+        if (buf_append(store, "HTTP_", 5) != BUF_OK)
+            return -1;
+        for (k = 0; k < h->name_len; k++) {
+            char c = h->name[k];
+
+            c = c == '-' ? '_' : (char)toupper((unsigned char)c);
+            if (buf_append(store, &c, 1) != BUF_OK)
+                return -1;
+        }
+        if (buf_appendf(store, "=%.*s", (int)h->value_len, h->value) != BUF_OK ||
+            buf_append(store, "", 1) != BUF_OK)
+            return -1;
+    }
 #undef ENV_ADD
 
     /* store 가 realloc 될 수 있으므로 포인터는 다 쌓은 뒤에 계산한다 */
@@ -442,7 +481,7 @@ int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *
     size_t body_off = 0;
     pid_t pid = -1;
 
-    buf_init(&env, 1024, 64 * 1024);
+    buf_init(&env, 1024, 256 * 1024);
     buf_init(&out, 0, c->max_output + 1);
     buf_init(&head, 0, CGI_MAX_HEADERS_BYTES + 4096 + c->max_output);
     buf_init(&hdrs, 0, CGI_MAX_HEADERS_BYTES);

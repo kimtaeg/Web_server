@@ -8,7 +8,11 @@ PORT=""
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/cweb-func-XXXXXX")
 SERVER_LOG="$TMP/server.log"
 
+EXTRA_PIDS="" # spawn_server 로 띄운 보조 서버들
+
 cleanup() {
+    local p
+    for p in $EXTRA_PIDS; do kill -KILL "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
     stop_server
     chmod -R u+rwx "$TMP" 2>/dev/null
     rm -rf "$TMP"
@@ -54,6 +58,34 @@ start_server() {
     done
     echo "서버를 띄우지 못함. 로그:"
     cat "$SERVER_LOG"
+    exit 1
+}
+
+# spawn_server <포트|0> <로그파일> <바이너리> <옵션...>
+#   보조 서버(백엔드 등)를 띄운다. 포트 0 이면 빈 포트를 찾는다. 결과: SPAWN_PID, SPAWN_PORT.
+#   cleanup 시 자동으로 정리된다.
+spawn_server() {
+    local want=$1 log=$2 bin=$3 try i port
+    shift 3
+    for try in 1 2 3 4 5; do
+        if [ "$want" = 0 ]; then port=$((20000 + (RANDOM % 20000))); else port=$want; fi
+        "$bin" -H 127.0.0.1 -p "$port" "$@" >>"$log" 2>&1 &
+        SPAWN_PID=$!
+        for i in $(seq 1 50); do
+            kill -0 "$SPAWN_PID" 2>/dev/null || break
+            if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$port/" 2>/dev/null; then
+                SPAWN_PORT=$port
+                EXTRA_PIDS="$EXTRA_PIDS $SPAWN_PID"
+                return 0
+            fi
+            sleep 0.1
+        done
+        kill -KILL "$SPAWN_PID" 2>/dev/null
+        wait "$SPAWN_PID" 2>/dev/null
+        [ "$want" != 0 ] && sleep 0.3 # 같은 포트 재시도: 이전 소켓 정리 대기
+    done
+    echo "보조 서버를 띄우지 못함: $bin $*"
+    cat "$log"
     exit 1
 }
 
