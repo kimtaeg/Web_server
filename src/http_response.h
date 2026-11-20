@@ -17,6 +17,13 @@
 
 const char *http_status_reason(int status);
 
+/*
+ * 백엔드 모드: 설정하면 이후 모든 응답 헤더에 "X-Backend: <name>" 이 붙는다 (로드밸런싱 확인용).
+ * 동기화: 워커 스레드를 만들기 전에 main 이 한 번만 호출한다. 이후 읽기 전용이라 락이 없다.
+ * NULL 이면 해제.
+ */
+void http_response_set_backend_name(const char *name);
+
 /* RFC 9110 5.6.7 IMF-fixdate. locale 에 의존하지 않도록 요일/월 이름을 직접 쓴다. */
 void http_date(char out[HTTP_DATE_LEN], time_t t);
 

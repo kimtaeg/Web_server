@@ -113,6 +113,24 @@ static void test_status_page_send(void)
     close(sv[1]);
 }
 
+static void test_backend_name(void)
+{
+    buf_t b;
+
+    buf_init(&b, 0, 4096);
+    http_response_head(&b, 200, NULL, 0, 1, NULL);
+    CHECK(strstr(b.data, "X-Backend") == NULL); /* 기본은 없음 */
+    http_response_set_backend_name("A");
+    buf_reset(&b);
+    http_response_head(&b, 200, NULL, 0, 1, NULL);
+    CHECK(strstr(b.data, "\r\nX-Backend: A\r\n") != NULL);
+    buf_reset(&b);
+    http_response_build_status_page(&b, 503, 0, 0, NULL); /* 오류 페이지에도 */
+    CHECK(strstr(b.data, "\r\nX-Backend: A\r\n") != NULL);
+    http_response_set_backend_name(NULL);
+    buf_free(&b);
+}
+
 int main(void)
 {
     RUN_TEST(test_reason_phrases);
@@ -120,5 +138,6 @@ int main(void)
     RUN_TEST(test_head_format);
     RUN_TEST(test_status_page_length);
     RUN_TEST(test_status_page_send);
+    RUN_TEST(test_backend_name);
     TEST_END();
 }

@@ -1,7 +1,7 @@
 /*
- * main.c — 진입점: 옵션 파싱 → 시그널 설정 → listen → 워커 풀 → accept 루프 → 정리.
+ * main.c — 진입점: 옵션/설정 → 시그널 → 라우팅 구성 → listen → 워커 풀 → accept 루프 → 정리.
  *
- * 설정 파일(config 모듈)은 3단계에서 들어온다. 지금은 명령줄 옵션만 받는다.
+ * 설정 우선순위: 기본값 < 설정 파일(-f) < 명령줄 옵션.
  */
 #include <errno.h>
 #include <signal.h>
@@ -11,9 +11,12 @@
 #include <unistd.h>
 
 #include "cgi.h"
+#include "config.h"
 #include "conn.h"
+#include "http_response.h"
 #include "log.h"
 #include "router.h"
+#include "rproxy.h"
 #include "server.h"
 #include "static.h"
 #include "threadpool.h"
@@ -33,8 +36,10 @@ static void on_stop_signal(int sig)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "사용법: %s [-H host] [-p port] [-r root] [-w workers] [-q queue]\n"
-            "          [-t idle_timeout_ms] [-m max_requests] [-g cgi_dir] [-c cgi_timeout_ms] [-v]\n"
+            "사용법: %s [-f config] [-H host] [-p port] [-r root] [-w workers] [-q queue]\n"
+            "          [-t idle_timeout_ms] [-m max_requests] [-g cgi_dir] [-c cgi_timeout_ms]\n"
+            "          [-n|--name 백엔드이름] [-v]\n"
+            "  -f  설정 파일 (route 등). 명령줄 옵션이 설정 파일보다 우선\n"
             "  -H  바인드 주소 (기본 0.0.0.0)\n"
             "  -p  포트 (기본 8080)\n"
             "  -r  문서 루트 (기본 ./www)\n"
@@ -44,6 +49,7 @@ static void usage(const char *prog)
             "  -m  연결당 최대 요청 수 (기본 100)\n"
             "  -g  CGI 디렉터리: /cgi-bin/<이름> 을 여기서 실행 (없으면 CGI 비활성)\n"
             "  -c  CGI 타임아웃 ms (기본 5000, 초과 시 504)\n"
+            "  -n  백엔드 모드: 모든 응답에 'X-Backend: <이름>' (로드밸런싱 확인용)\n"
             "  -v  디버그 로그\n",
             prog);
 }
@@ -79,93 +85,195 @@ static int install_signals(void)
     return 0;
 }
 
+/*
+ * "--name X" / "--name=X" 를 argv 에서 꺼내고 나머지를 out 으로 옮긴다.
+ * getopt_long 은 POSIX 가 아니라서(GNU/BSD 확장) 쓰지 않는다. 짧은 형식 "-n X" 는 getopt 가 처리.
+ */
+static int extract_long_name(int argc, char **argv, char **out, const char **name)
+{
+    int i, n = 0;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--name") == 0) {
+            if (i + 1 >= argc)
+                return -1;
+            *name = argv[++i];
+        } else if (strncmp(argv[i], "--name=", 7) == 0) {
+            *name = argv[i] + 7;
+        } else {
+            out[n++] = argv[i];
+        }
+    }
+    out[n] = NULL;
+    return n;
+}
+
+/* 명령줄에서 받은 값. set_* 가 1 인 것만 설정 파일 값을 덮어쓴다. */
+typedef struct {
+    const char *config_path, *host, *root, *cgi_dir, *name;
+    long port, workers, queue, idle, maxreq, cgi_ms;
+    int set_port, set_workers, set_queue, set_idle, set_maxreq, set_cgi_ms, verbose;
+} cli_t;
+
+static void apply_cli(config_t *c, const cli_t *o)
+{
+    if (o->host)
+        snprintf(c->listen_host, sizeof c->listen_host, "%s", o->host);
+    if (o->root)
+        snprintf(c->root, sizeof c->root, "%s", o->root);
+    if (o->cgi_dir) {
+        snprintf(c->cgi_prefix, sizeof c->cgi_prefix, "/cgi-bin");
+        snprintf(c->cgi_dir, sizeof c->cgi_dir, "%s", o->cgi_dir);
+    }
+    if (o->set_port)
+        c->listen_port = (int)o->port;
+    if (o->set_workers)
+        c->workers = o->workers;
+    if (o->set_queue)
+        c->queue = o->queue;
+    if (o->set_idle)
+        c->idle_timeout_ms = o->idle;
+    if (o->set_maxreq)
+        c->max_requests = o->maxreq;
+    if (o->set_cgi_ms)
+        c->cgi_timeout_ms = o->cgi_ms;
+}
+
 int main(int argc, char **argv)
 {
-    /* PATH_MAX 배열을 담으므로 스택 대신 정적 저장소. 시작 시 한 번 쓰고 이후 읽기 전용 */
+    /* 큰 배열(PATH_MAX, 백엔드 풀)을 담으므로 스택 대신 정적 저장소.
+     * 모두 시작 시 main 스레드가 한 번 쓰고, 워커 생성 이후에는 읽기 전용이다
+     * (예외: rproxy 풀의 rr/down 은 원자 변수 — rproxy.h 참고). */
+    static config_t cfg;
     static static_ctx_t sctx;
     static cgi_ctx_t cctx;
     static router_t router;
-    const char *cgi_dir = NULL;
-    long cgi_ms = CGI_DEFAULT_TIMEOUT_MS;
+    static rproxy_pool_t pools[CONFIG_MAX_ROUTES];
+    static char *args[256];
     const http_limits_t default_limits = HTTP_LIMITS_DEFAULT;
-    const char *host = "0.0.0.0";
-    const char *root = "./www";
-    long port = 8080, workers = 8, queue = 64, idle_ms = 5000, max_req = 100;
-    int verbose = 0;
+    cli_t cli;
+    char err[512];
+    int nargs;
     int opt;
     int lfd = -1;
     int rc = 1;
+    size_t i;
     threadpool_t *tp = NULL;
     conn_config_t ccfg;
 
-    while ((opt = getopt(argc, argv, "H:p:r:w:q:t:m:g:c:vh")) != -1) {
+    memset(&cli, 0, sizeof cli);
+    if (argc >= (int)(sizeof args / sizeof args[0])) {
+        fprintf(stderr, "인자가 너무 많다\n");
+        return 2;
+    }
+    nargs = extract_long_name(argc, argv, args, &cli.name);
+    if (nargs < 0) {
+        fprintf(stderr, "--name 에 값이 필요하다\n");
+        return 2;
+    }
+
+    while ((opt = getopt(nargs, args, "f:H:p:r:w:q:t:m:g:c:n:vh")) != -1) {
         int bad = 0;
 
         switch (opt) {
-        case 'H': host = optarg; break;
-        case 'r': root = optarg; break;
-        case 'p': bad = parse_long(optarg, 1, 65535, &port); break;
-        case 'w': bad = parse_long(optarg, 1, 1024, &workers); break;
-        case 'q': bad = parse_long(optarg, 1, 65536, &queue); break;
-        case 't': bad = parse_long(optarg, 1, 3600 * 1000, &idle_ms); break;
-        case 'm': bad = parse_long(optarg, 1, 1000000, &max_req); break;
-        case 'g': cgi_dir = optarg; break;
-        case 'c': bad = parse_long(optarg, 1, 3600 * 1000, &cgi_ms); break;
-        case 'v': verbose = 1; break;
-        default: usage(argv[0]); return opt == 'h' ? 0 : 2;
+        case 'f': cli.config_path = optarg; break;
+        case 'H': cli.host = optarg; break;
+        case 'r': cli.root = optarg; break;
+        case 'g': cli.cgi_dir = optarg; break;
+        case 'n': cli.name = optarg; break;
+        case 'p': bad = parse_long(optarg, 1, 65535, &cli.port); cli.set_port = 1; break;
+        case 'w': bad = parse_long(optarg, 1, 1024, &cli.workers); cli.set_workers = 1; break;
+        case 'q': bad = parse_long(optarg, 1, 65536, &cli.queue); cli.set_queue = 1; break;
+        case 't': bad = parse_long(optarg, 1, 3600 * 1000, &cli.idle); cli.set_idle = 1; break;
+        case 'm': bad = parse_long(optarg, 1, 1000000, &cli.maxreq); cli.set_maxreq = 1; break;
+        case 'c': bad = parse_long(optarg, 1, 3600 * 1000, &cli.cgi_ms); cli.set_cgi_ms = 1; break;
+        case 'v': cli.verbose = 1; break;
+        default: usage(args[0]); return opt == 'h' ? 0 : 2;
         }
         if (bad) {
             fprintf(stderr, "잘못된 값: -%c %s\n", opt, optarg);
-            usage(argv[0]);
+            usage(args[0]);
             return 2;
         }
     }
 
-    log_init(verbose ? LOG_DEBUG : LOG_INFO, NULL);
+    log_init(cli.verbose ? LOG_DEBUG : LOG_INFO, NULL);
+    config_defaults(&cfg);
+    if (cli.config_path != NULL && config_load(cli.config_path, &cfg, err, sizeof err) != 0) {
+        log_msg(LOG_ERROR, "설정 파일 %s: %s", cli.config_path, err);
+        return 2;
+    }
+    apply_cli(&cfg, &cli);
+    if (cli.name != NULL)
+        http_response_set_backend_name(cli.name); /* 워커 생성 전에 한 번만 */
+
     if (install_signals() != 0) {
         log_msg(LOG_ERROR, "시그널 설정 실패: %s", strerror(errno));
         return 1;
     }
-    if (static_init(&sctx, root) != 0) {
-        log_msg(LOG_ERROR, "문서 루트를 열 수 없음: '%s' (%s)", root, strerror(errno));
+    if (static_init(&sctx, cfg.root) != 0) {
+        log_msg(LOG_ERROR, "문서 루트를 열 수 없음: '%s' (%s)", cfg.root, strerror(errno));
         return 1;
     }
-    /* 라우팅: /cgi-bin/ → CGI, 나머지 → 정적 파일 */
+
+    /* 라우팅: 설정의 route 들, CGI, 그 외는 정적 파일 */
     router_init(&router, static_handle, &sctx);
-    if (cgi_dir != NULL) {
-        if (cgi_init(&cctx, cgi_dir, "/cgi-bin", (int)cgi_ms) != 0) {
-            log_msg(LOG_ERROR, "CGI 디렉터리를 열 수 없음: '%s' (%s)", cgi_dir, strerror(errno));
+    if (cfg.cgi_prefix[0] != '\0') {
+        if (cgi_init(&cctx, cfg.cgi_dir, cfg.cgi_prefix, (int)cfg.cgi_timeout_ms) != 0) {
+            log_msg(LOG_ERROR, "CGI 디렉터리를 열 수 없음: '%s' (%s)", cfg.cgi_dir, strerror(errno));
             return 1;
         }
         if (cctx.dir_len > sctx.root_len && strncmp(cctx.dir, sctx.root, sctx.root_len) == 0 &&
             cctx.dir[sctx.root_len] == '/')
             log_msg(LOG_WARN, "CGI 디렉터리가 문서 루트 안에 있다: 실행 파일이 정적 파일로 노출될 수 있음");
-        router_add(&router, "/cgi-bin", cgi_handle, &cctx);
+        if (router_add(&router, cfg.cgi_prefix, cgi_handle, &cctx) != 0) {
+            log_msg(LOG_ERROR, "CGI 라우트 추가 실패");
+            return 1;
+        }
+        log_msg(LOG_INFO, "CGI: %s/ -> %s (timeout %ldms)", cctx.prefix, cctx.dir,
+                cfg.cgi_timeout_ms);
+    }
+    for (i = 0; i < cfg.nroutes; i++) {
+        const config_route_t *r = &cfg.routes[i];
+        size_t b;
+
+        if (rproxy_pool_init(&pools[i], r->backends, r->nbackends,
+                             (int)cfg.upstream_connect_timeout_ms, (int)cfg.upstream_read_timeout_ms,
+                             cfg.upstream_down_secs, err, sizeof err) != 0) {
+            log_msg(LOG_ERROR, "route %s: %s", r->prefix, err);
+            return 1;
+        }
+        if (router_add_host(&router, r->host, r->prefix, rproxy_handle, &pools[i]) != 0) {
+            log_msg(LOG_ERROR, "route %s 추가 실패 (규칙이 너무 많음)", r->prefix);
+            return 1;
+        }
+        for (b = 0; b < pools[i].n; b++)
+            log_msg(LOG_INFO, "route %s%s%s -> %s", r->host[0] ? "host=" : "", r->host,
+                    r->prefix, pools[i].backends[b].name);
     }
 
-    lfd = server_listen(host, (int)port, 128);
+    lfd = server_listen(cfg.listen_host, cfg.listen_port, 128);
     if (lfd < 0)
         goto cleanup; /* 원인은 server_listen 이 이미 로그로 남겼다 */
 
     memset(&ccfg, 0, sizeof ccfg);
     ccfg.limits = default_limits;
-    ccfg.idle_timeout_ms = (int)idle_ms;
+    ccfg.idle_timeout_ms = (int)cfg.idle_timeout_ms;
     ccfg.send_timeout_ms = 10000;
-    ccfg.max_requests = (int)max_req;
+    ccfg.max_requests = (int)cfg.max_requests;
     ccfg.handler = router_handle;
     ccfg.handler_ctx = &router;
     ccfg.stop = &g_stop;
 
-    tp = threadpool_create((size_t)workers, (size_t)queue, conn_worker, &ccfg);
+    tp = threadpool_create((size_t)cfg.workers, (size_t)cfg.queue, conn_worker, &ccfg);
     if (tp == NULL) {
         log_msg(LOG_ERROR, "워커 풀 생성 실패");
         goto cleanup;
     }
 
-    log_msg(LOG_INFO, "listening on http://%s:%ld  root=%s  workers=%ld queue=%ld idle=%ldms", host,
-            port, sctx.root, workers, queue, idle_ms);
-    if (cgi_dir != NULL)
-        log_msg(LOG_INFO, "CGI: /cgi-bin/ -> %s (timeout %ldms)", cctx.dir, cgi_ms);
+    log_msg(LOG_INFO, "listening on http://%s:%d  root=%s  workers=%ld queue=%ld idle=%ldms%s%s",
+            cfg.listen_host, cfg.listen_port, sctx.root, cfg.workers, cfg.queue,
+            cfg.idle_timeout_ms, cli.name ? "  backend-name=" : "", cli.name ? cli.name : "");
     rc = server_run(lfd, tp, &g_stop) == 0 ? 0 : 1;
     log_msg(LOG_INFO, "종료 시작 (signal)");
 

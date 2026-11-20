@@ -9,6 +9,14 @@
 
 #include "netio.h"
 
+/* 시작 시 한 번만 쓰고 이후 읽기 전용 (http_response.h 참고) */
+static const char *g_backend_name;
+
+void http_response_set_backend_name(const char *name)
+{
+    g_backend_name = name;
+}
+
 const char *http_status_reason(int status)
 {
     switch (status) {
@@ -59,11 +67,14 @@ int http_response_head(buf_t *out, int status, const char *ctype, size_t content
                        "%s%s%s"
                        "Content-Length: %zu\r\n"
                        "Connection: %s\r\n"
+                       "%s%s%s"
                        "%s"
                        "\r\n",
                        status, http_status_reason(status), date, ctype ? "Content-Type: " : "",
                        ctype ? ctype : "", ctype ? "\r\n" : "", content_length,
-                       keep_alive ? "keep-alive" : "close", extra_headers ? extra_headers : "");
+                       keep_alive ? "keep-alive" : "close", g_backend_name ? "X-Backend: " : "",
+                       g_backend_name ? g_backend_name : "", g_backend_name ? "\r\n" : "",
+                       extra_headers ? extra_headers : "");
 }
 
 int http_response_build_status_page(buf_t *out, int status, int keep_alive, int head_only,

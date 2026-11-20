@@ -18,6 +18,18 @@ printf '<h1>home</h1>' >"$WWW/index.html"
 printf 'docs' >"$WWW/docs/index.html"
 head -c 500000 /dev/urandom >"$WWW/big.bin"
 
+# 리버스 프록시 경로용 백엔드 하나 (release 빌드 — 누수 검사 대상은 프록시 쪽)
+mkdir -p "$TMP/wwwB"
+printf 'backend' >"$TMP/wwwB/index.html"
+spawn_server 0 "$TMP/backend.log" "$(dirname "$DEBUG_BIN")/../release/webserver" --name B -r "$TMP/wwwB"
+cat >"$TMP/leak.conf" <<EOF
+upstream_connect_timeout_ms 300
+upstream_read_timeout_ms 1000
+upstream_down_secs 1
+route /api  127.0.0.1:$SPAWN_PORT
+route /dead 127.0.0.1:1 127.0.0.1:2
+EOF
+
 # 서버가 처리하는 거의 모든 경로를 한 번씩 밟는다 (정상/오류/keep-alive/중간 끊김).
 traffic() {
     curl -s -o /dev/null "$(url /)"
@@ -32,6 +44,11 @@ traffic() {
     curl -s -o /dev/null -X POST --data-binary @"$WWW/big.bin" "$(url /cgi-bin/echo)"      # CGI + 본문
     curl -s -o /dev/null "$(url '/cgi-bin/sleep?s=10')"                                     # CGI 타임아웃 → kill
     curl -s -o /dev/null "$(url /cgi-bin/nope)"                                             # CGI 404
+    curl -s -o /dev/null "$(url /api/)"                                                     # 프록시 중계
+    curl -s -o /dev/null -X POST --data-binary @"$WWW/big.bin" "$(url /api/x)"             # 프록시 + 본문 (404)
+    curl -s -o /dev/null -o /dev/null "$(url /api/)" "$(url /api/)"                         # 프록시 keep-alive
+    curl -s -o /dev/null "$(url /dead)"                                                     # 연결 실패 → 재시도 → 502
+    curl -s -o /dev/null "$(url /dead)"                                                     # 전부 down → 즉시 502
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"; printf 'GET / HTTP/1.1\r\nHo' >&5; exec 5>&-     # 중간 끊김
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"                                                    # 유휴 연결을 연 채로
     sleep 0.3                                                                             # SIGINT 를 맞게 한다
@@ -43,7 +60,8 @@ launch() { # launch <바이너리> <명령...>; SERVER_PID 는 신호를 보낼 
     cgi="$(cd "$(dirname "$1")" && pwd)/cgi-bin" # 서버 바이너리 옆에 빌드된 예제 CGI
     shift
     PORT=$((20000 + (RANDOM % 20000)))
-    "$@" -H 127.0.0.1 -p "$PORT" -r "$WWW" -g "$cgi" -c 1000 -w 4 -q 16 -t 2000 >"$SERVER_LOG" 2>&1 &
+    "$@" -f "$TMP/leak.conf" -H 127.0.0.1 -p "$PORT" -r "$WWW" -g "$cgi" -c 1000 -w 4 -q 16 -t 2000 \
+        >"$SERVER_LOG" 2>&1 &
     LAUNCH_PID=$!
     for i in $(seq 1 100); do
         curl -s -o /dev/null --max-time 1 "$(url /)" && break
@@ -90,5 +108,5 @@ else
     check "ASan: 오류 보고 없음" none none
 fi
 echo "--- 접근 로그 일부 ---"
-grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin| "GET / ' | head -8
+grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin|/api|/dead| "GET / ' | head -14
 finish

@@ -41,7 +41,7 @@ LDLIBS := -pthread
 
 # 구현이 끝난 모듈만 나열한다. 빈 모듈은 -pedantic 에서 "빈 번역 단위" 오류가 나므로
 # 각 단계에서 구현할 때 여기에 추가한다.
-MODULES := buf http_parser mime netio log http_response threadpool server conn static router cgi
+MODULES := buf http_parser mime netio log http_response threadpool server conn static router cgi config upstream rproxy
 
 BUILD     := build/$(MODE)
 LIB_OBJS  := $(patsubst %,$(BUILD)/obj/%.o,$(MODULES))
@@ -70,6 +70,7 @@ asan:
 leakcheck:
 	@$(MAKE) --no-print-directory MODE=asan bin
 	@$(MAKE) --no-print-directory MODE=debug bin
+	@$(MAKE) --no-print-directory MODE=release bin
 	@bash tests/leak/leakcheck.sh build/asan/webserver build/debug/webserver
 
 # 기능 테스트: 실제 서버를 띄우고 curl 로 검증 (포트와 curl 이 필요해서 test 와 분리)
