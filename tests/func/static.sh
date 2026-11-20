@@ -90,12 +90,11 @@ start_server "$BIN" -r "$WWW" -w 1 -q 1 -t 3000
 exec 3<>"/dev/tcp/127.0.0.1/$PORT" # 워커가 잡고 요청을 기다림
 sleep 0.2
 exec 4<>"/dev/tcp/127.0.0.1/$PORT" # 큐에 대기
-sleep 0.2
-check "큐 포화 → 503" 503 "$(status_of /)"
+# 워커가 3 을 잡고 4 가 큐에 들어가는 시점은 스케줄링에 달려 있다 → 고정 sleep 대신 재시도
+eventually "큐 포화 → 503" 503 status_of / --max-time 1
 check_contains "503 Retry-After" "Retry-After: 1" "$(curl -s -i "$(url /)")"
 exec 3>&- 4>&-
-sleep 0.3
-check "붙잡은 연결을 놓으면 다시 200" 200 "$(status_of /)"
+eventually "붙잡은 연결을 놓으면 다시 200" 200 status_of / --max-time 1
 
 # ---- 종료: SIGINT 후 정상 종료 메시지 ----
 stop_server

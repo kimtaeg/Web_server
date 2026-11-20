@@ -39,9 +39,17 @@ typedef struct {
     size_t n;
     conn_handler_fn fallback;
     void *fallback_ctx;
+    conn_handler_fn absolute;  /* absolute-form 요청 담당 (포워드 프록시). NULL = 일반 라우팅 */
+    void *absolute_ctx;
 } router_t;
 
 void router_init(router_t *r, conn_handler_fn fallback, void *fallback_ctx);
+
+/*
+ * absolute-form("GET http://host/path") 요청을 경로 규칙보다 먼저 이 핸들러로 보낸다.
+ * 설정하지 않으면 absolute-form 도 경로(path)로 일반 라우팅된다 (RFC 9112 3.2.2: 서버는 받아야 함).
+ */
+void router_set_absolute_handler(router_t *r, conn_handler_fn fn, void *ctx);
 
 /* prefix 는 '/' 로 시작해야 한다. host 가 NULL 이거나 "" 면 모든 Host. 실패 -1. */
 int router_add_host(router_t *r, const char *host, const char *prefix, conn_handler_fn fn,

@@ -29,6 +29,19 @@ check() { # check <이름> <기대> <실제>
     fi
 }
 
+# eventually <이름> <기대> <명령...>: 타이밍에 민감한 검사용. 최대 20회(0.1초 간격) 재시도해서
+# 한 번이라도 기대값이 나오면 통과. 고정 sleep 으로 "그 사이 서버가 준비됐겠지"라고 가정하지 않는다.
+eventually() {
+    local name=$1 want=$2 got i
+    shift 2
+    for i in $(seq 1 20); do
+        got=$("$@")
+        [ "$got" = "$want" ] && break
+        sleep 0.1
+    done
+    check "$name" "$want" "$got"
+}
+
 check_contains() { # check_contains <이름> <찾을 문자열> <대상>
     case "$3" in
     *"$2"*) PASS=$((PASS + 1)); printf '  ok   %s\n' "$1" ;;

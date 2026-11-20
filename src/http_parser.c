@@ -77,7 +77,17 @@ static parse_result_t fail(http_parser_t *p, int status)
 /* 요청줄                                                              */
 /* ------------------------------------------------------------------ */
 
-/* 대상 형태 검사: origin-form("/..."), absolute-form("http://authority..."), asterisk("*", OPTIONS 만). */
+/* "http://" → 7, "https://" → 8, 그 외 0 (대소문자 무시). https 는 형식만 허용하고 처리는 fproxy 가 거절. */
+static size_t scheme_len(const char *t, size_t n)
+{
+    if (n >= 7 && strncasecmp(t, "http://", 7) == 0)
+        return 7;
+    if (n >= 8 && strncasecmp(t, "https://", 8) == 0)
+        return 8;
+    return 0;
+}
+
+/* 대상 형태 검사: origin-form("/..."), absolute-form("http(s)://authority..."), asterisk("*", OPTIONS 만). */
 static int check_target_form(http_method_t m, const char *t, size_t n)
 {
     size_t a;
@@ -86,10 +96,14 @@ static int check_target_form(http_method_t m, const char *t, size_t n)
         return 0;
     if (t[0] == '*')
         return (n == 1 && m == HTTP_OPTIONS) ? 0 : 400;
-    if (n >= 7 && strncasecmp(t, "http://", 7) == 0) {
-        for (a = 7; a < n && t[a] != '/' && t[a] != '?'; a++)
-            ;
-        return a > 7 ? 0 : 400; /* authority 가 비면 안 된다 */
+    {
+        size_t sl = scheme_len(t, n);
+
+        if (sl > 0) {
+            for (a = sl; a < n && t[a] != '/' && t[a] != '?'; a++)
+                ;
+            return a > sl ? 0 : 400; /* authority 가 비면 안 된다 */
+        }
     }
     return 400;
 }
@@ -339,14 +353,17 @@ static void fill_request(const http_parser_t *p, const char *data, http_request_
     req->authority = NULL;
     req->authority_len = 0;
 
-    if (tl >= 7 && strncasecmp(t, "http://", 7) == 0) {
-        size_t ae = 7;
+    req->is_https = 0;
+    if (scheme_len(t, tl) > 0) {
+        size_t sl = scheme_len(t, tl);
+        size_t ae = sl;
 
         while (ae < tl && t[ae] != '/' && t[ae] != '?')
             ae++;
         req->is_absolute = 1;
-        req->authority = t + 7;
-        req->authority_len = ae - 7;
+        req->is_https = sl == 8;
+        req->authority = t + sl;
+        req->authority_len = ae - sl;
         rest = t + ae;
         rl = tl - ae;
     }

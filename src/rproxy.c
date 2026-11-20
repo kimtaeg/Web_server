@@ -114,6 +114,12 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     buf_init(&out, 4096, req->body_len + 128 * 1024);
     buf_init(&tgt, 256, 16 * 1024);
 
+    if (upstream_request_has_our_via(req)) { /* 내가 보낸 요청이 돌아옴: 라우트가 자기 자신을 가리킴 */
+        log_msg(LOG_WARN, "rproxy: 프록시 루프 감지 (Via 에 자기 표식) → 508");
+        rc = reply(fd, 508, 0, is_head, res);
+        res->close = 1;
+        goto cleanup;
+    }
     idx = rproxy_pick(p, rproxy_now_ms(), -1);
     if (idx < 0) {
         log_msg(LOG_WARN, "rproxy: 모든 백엔드가 down → 502");
@@ -159,7 +165,7 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         goto cleanup;
     }
 
-    relay = upstream_relay(ufd, fd, req, keep_alive, p->read_timeout_ms, &ur);
+    relay = upstream_relay(ufd, fd, req, keep_alive, p->read_timeout_ms, NULL, NULL, &ur);
     switch (relay) {
     case UPSTREAM_OK:
         res->status = ur.status;

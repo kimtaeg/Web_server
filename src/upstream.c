@@ -72,6 +72,38 @@ static int req_named_in_connection(const http_request_t *req, const char *name, 
 }
 
 /* ------------------------------------------------------------------ */
+/* Via 표식과 루프 감지                                                 */
+/* ------------------------------------------------------------------ */
+
+/* 시작 시 한 번만 쓰고 이후 읽기 전용 (upstream.h 참고) */
+static const char *g_via = UPSTREAM_VIA_DEFAULT;
+
+void upstream_set_via(const char *via)
+{
+    g_via = via ? via : UPSTREAM_VIA_DEFAULT;
+}
+
+const char *upstream_via(void)
+{
+    return g_via;
+}
+
+int upstream_request_has_our_via(const http_request_t *req)
+{
+    size_t vl = strlen(g_via);
+    size_t i;
+
+    for (i = 0; i < req->header_count; i++) {
+        const http_header_t *h = &req->headers[i];
+
+        /* Via 는 쉼표로 구분된 목록. 우리 표식과 정확히 같은 항목이 있는가 */
+        if (ieq(h->name, h->name_len, "via") && token_in_list(h->value, h->value_len, g_via, vl))
+            return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* 요청 재작성                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -119,9 +151,9 @@ int upstream_build_request(buf_t *out, const http_request_t *req, const char *ta
         rc = buf_appendf(out,
                          "X-Forwarded-For: %s%s%s\r\n"
                          "X-Forwarded-Proto: http\r\n"
-                         "Via: %s%s" UPSTREAM_VIA "\r\n",
+                         "Via: %s%s%s\r\n",
                          xff, xl ? ", " : "", client_ip ? client_ip : "unknown", via,
-                         vl ? ", " : "");
+                         vl ? ", " : "", g_via);
     if (rc == BUF_OK && (req->body_len > 0 || http_header_get(req, "Content-Length", NULL) != NULL))
         rc = buf_appendf(out, "Content-Length: %zu\r\n", req->body_len);
     if (rc == BUF_OK)
@@ -323,15 +355,23 @@ static int resp_named_in_connection(const char *p, const upstream_resp_t *r, con
 
 enum { BODY_NONE, BODY_LENGTH, BODY_UNTIL_EOF };
 
+/* 캐시 사본에 본문 조각을 쌓는다. 상한을 넘으면 그 뒤로는 포기 (중계는 계속) */
+static void capture_body(upstream_capture_t *cap, const char *p, size_t n)
+{
+    if (cap != NULL && !cap->overflow && buf_append(&cap->body, p, n) != BUF_OK)
+        cap->overflow = 1;
+}
+
 int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_alive,
-                   int read_timeout_ms, upstream_result_t *res)
+                   int read_timeout_ms, const char *extra_headers, upstream_capture_t *cap,
+                   upstream_result_t *res)
 {
     buf_t in;
     buf_t head;
     char tmp[RELAY_CHUNK];
     upstream_resp_t r;
     int rc = UPSTREAM_EBAD;
-    int mode;
+    int mode = BODY_NONE;
     int ka = client_keep_alive;
     size_t i;
     size_t have;
@@ -398,7 +438,14 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
                         in.data + r.val_off[i]) != BUF_OK)
             goto cleanup;
     }
-    if ((r.chunked && buf_appendf(&head, "Transfer-Encoding: chunked\r\n") != BUF_OK) ||
+    if (r.chunked && buf_appendf(&head, "Transfer-Encoding: chunked\r\n") != BUF_OK)
+        goto cleanup;
+    if (cap != NULL) { /* 사본에는 연결 단위 헤더(Connection)와 X-Cache 같은 extra 를 넣지 않는다 */
+        cap->status = r.status;
+        if (buf_append(&cap->head, head.data, head.len) != BUF_OK)
+            cap->overflow = 1;
+    }
+    if ((extra_headers && buf_appendf(&head, "%s", extra_headers) != BUF_OK) ||
         buf_appendf(&head, "Connection: %s\r\n\r\n", ka ? "keep-alive" : "close") != BUF_OK)
         goto cleanup;
 
@@ -420,6 +467,7 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
     if (mode == BODY_LENGTH && have > left)
         have = left; /* CL 을 넘는 여분은 버린다 */
     if (have > 0) {
+        capture_body(cap, in.data + r.head_len, have);
         if (send_all(cfd, in.data + r.head_len, have) < 0) {
             rc = UPSTREAM_ECLIENT;
             goto cleanup;
@@ -444,6 +492,7 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
         }
         if (n <= 0) /* 타임아웃, 오류, CL 을 채우기 전 EOF → 클라이언트에겐 잘린 응답 */
             break;
+        capture_body(cap, tmp, (size_t)n);
         if (send_all(cfd, tmp, (size_t)n) < 0) {
             rc = UPSTREAM_ECLIENT;
             break;
@@ -456,6 +505,9 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
 cleanup:
     if (rc != UPSTREAM_OK)
         res->client_keep_alive = 0;
+    /* 저장해도 되는 사본: 정상 완료 + 길이를 아는 응답(CL) + 잘림 없음 */
+    if (cap != NULL)
+        cap->complete = rc == UPSTREAM_OK && mode == BODY_LENGTH && !cap->overflow;
     buf_free(&head);
     buf_free(&in);
     return rc;

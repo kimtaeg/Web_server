@@ -63,7 +63,8 @@ typedef struct {
     size_t path_len;
     const char *query; /* '?' 뒤. 없으면 NULL, 0 */
     size_t query_len;
-    int is_absolute;       /* "http://authority/..." 형태 (포워드 프록시 요청) */
+    int is_absolute;       /* "http(s)://authority/..." 형태 (포워드 프록시 요청) */
+    int is_https;          /* absolute-form 의 스킴이 https (형식상 허용, 처리는 fproxy 가 501) */
     const char *authority; /* is_absolute 일 때 host[:port], 아니면 NULL */
     size_t authority_len;
     int version_minor; /* HTTP/1.x 의 x: 0 또는 1 */

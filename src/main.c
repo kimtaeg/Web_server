@@ -13,6 +13,7 @@
 #include "cgi.h"
 #include "config.h"
 #include "conn.h"
+#include "fproxy.h"
 #include "http_response.h"
 #include "log.h"
 #include "router.h"
@@ -20,6 +21,7 @@
 #include "server.h"
 #include "static.h"
 #include "threadpool.h"
+#include "upstream.h"
 
 /*
  * 시그널 핸들러는 이 플래그만 세운다. 핸들러 안에서는 async-signal-safe 함수만 부를 수 있어서
@@ -150,6 +152,9 @@ int main(int argc, char **argv)
     static router_t router;
     static rproxy_pool_t pools[CONFIG_MAX_ROUTES];
     static char *args[256];
+    static fproxy_ctx_t fctx;
+    static char via[64];
+    cache_t *cache = NULL;
     const http_limits_t default_limits = HTTP_LIMITS_DEFAULT;
     cli_t cli;
     char err[512];
@@ -252,6 +257,28 @@ int main(int argc, char **argv)
                     r->prefix, pools[i].backends[b].name);
     }
 
+    /* 이 인스턴스만의 Via 표식: 자기 요청이 돌아오면(프록시 루프) 알아챈다 (upstream.h) */
+    snprintf(via, sizeof via, "%s-%lx", UPSTREAM_VIA_DEFAULT, (unsigned long)getpid());
+    upstream_set_via(via);
+    if (cfg.forward_proxy) {
+        if (cfg.cache_max_bytes > 0) {
+            cache = cache_create((size_t)cfg.cache_max_bytes, (size_t)cfg.cache_max_object_bytes, 0);
+            if (cache == NULL) {
+                log_msg(LOG_ERROR, "캐시 생성 실패");
+                return 1;
+            }
+        }
+        fctx.cache = cache;
+        fctx.connect_timeout_ms = (int)cfg.upstream_connect_timeout_ms;
+        fctx.read_timeout_ms = (int)cfg.upstream_read_timeout_ms;
+        fctx.default_ttl_ms = cfg.cache_default_ttl_secs * 1000LL;
+        router_set_absolute_handler(&router, fproxy_handle, &fctx);
+        log_msg(LOG_INFO, "forward proxy: on (cache %s, max %ld bytes, object %ld bytes, ttl %lds)",
+                cache ? "on" : "off", cfg.cache_max_bytes, cfg.cache_max_object_bytes,
+                cfg.cache_default_ttl_secs);
+    }
+    log_msg(LOG_INFO, "Via 표식: %s", via);
+
     lfd = server_listen(cfg.listen_host, cfg.listen_port, 128);
     if (lfd < 0)
         goto cleanup; /* 원인은 server_listen 이 이미 로그로 남겼다 */
@@ -298,6 +325,14 @@ cleanup:
         threadpool_join_free(tp);
         tp = NULL;
         log_msg(LOG_INFO, "종료 3/4: 워커 전부 join, 풀 해제");
+    }
+    if (cache != NULL) { /* 워커가 모두 끝난 뒤에만 해제 (사용 중인 스레드가 없음) */
+        cache_stats_t st;
+
+        cache_stats(cache, &st);
+        log_msg(LOG_INFO, "cache: hits=%llu misses=%llu stores=%llu evictions=%llu entries=%zu bytes=%zu",
+                st.hits, st.misses, st.stores, st.evictions, st.entries, st.bytes);
+        cache_destroy(cache);
     }
     log_msg(LOG_INFO, "종료 4/4: %s", rc == 0 ? "정상 종료" : "오류로 종료");
     return rc;

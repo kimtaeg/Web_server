@@ -38,6 +38,7 @@ const char *http_status_reason(int status)
     case 503: return "Service Unavailable";
     case 504: return "Gateway Timeout";
     case 505: return "HTTP Version Not Supported";
+    case 508: return "Loop Detected";
     default: return "Unknown";
     }
 }

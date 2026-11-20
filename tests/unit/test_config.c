@@ -63,9 +63,14 @@ static void test_parse_full(void)
                        "upstream_down_secs 3\n"
                        "route /api 127.0.0.1:9001 127.0.0.1:9002\n"
                        "route host=Api.Local / [::1]:9003\n"
-                       "route /   10.0.0.1:80\r\n"; /* CRLF 줄도 허용 */
+                       "route /   10.0.0.1:80\r\n" /* CRLF 줄도 허용 */
+                       "forward_proxy on\n"
+                       "cache_max_bytes 1000000\n"
+                       "cache_max_object_bytes 5000\n"
+                       "cache_default_ttl_secs 0\n";
 
     config_defaults(&c);
+    CHECK_EQ_INT(c.forward_proxy, 0); /* 기본값: 포워드 프록시 꺼짐 (open proxy 방지) */
     CHECK_EQ_INT(config_parse_string(text, &c, err, sizeof err), 0);
     CHECK_EQ_STR(err, "");
     CHECK_EQ_STR(c.listen_host, "127.0.0.1");
@@ -89,6 +94,10 @@ static void test_parse_full(void)
     CHECK_EQ_STR(c.routes[1].prefix, "/");
     CHECK_EQ_STR(c.routes[1].backends[0].host, "::1");
     CHECK_EQ_STR(c.routes[2].backends[0].host, "10.0.0.1");
+    CHECK_EQ_INT(c.forward_proxy, 1);
+    CHECK_EQ_INT(c.cache_max_bytes, 1000000);
+    CHECK_EQ_INT(c.cache_max_object_bytes, 5000);
+    CHECK_EQ_INT(c.cache_default_ttl_secs, 0);
 }
 
 static void test_parse_errors(void)
@@ -112,6 +121,8 @@ static void test_parse_errors(void)
         {"root\n", "line 1: root"},
         {"ok_line_is_not_ok\n", "line 1:"},
         {"workers 2\nqueue 2\nfoo\n", "line 3:"},
+        {"forward_proxy yes\n", "line 1: forward_proxy 는 on 또는 off"},
+        {"cache_max_object_bytes 0\n", "line 1:"},
     };
     size_t i;
 

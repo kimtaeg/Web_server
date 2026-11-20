@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <strings.h>
 
 #include "buf.h"
 #include "http_parser.h"
@@ -256,6 +257,8 @@ static void test_absolute_form(void)
         {"GET http://example.com HTTP/1.1\r\nHost: example.com\r\n\r\n", "example.com", "/", NULL},
         {"GET HTTP://Example.com?q HTTP/1.1\r\nHost: e\r\n\r\n", "Example.com", "/", "q"},
         {"GET http://h/ HTTP/1.0\r\n\r\n", "h", "/", NULL},
+        {"GET HTTPS://secure.example:8443/p HTTP/1.1\r\nHost: s\r\n\r\n", "secure.example:8443", "/p",
+         NULL},
     };
     size_t i;
 
@@ -267,6 +270,7 @@ static void test_absolute_form(void)
         expect_all_modes("absolute-form", cases[i].raw, strlen(cases[i].raw), NULL, WANT_OK);
         REQUIRE(parse_once(cases[i].raw, NULL, &req, &used, &status) == PARSE_OK);
         CHECK_EQ_INT(req.is_absolute, 1);
+        CHECK_EQ_INT(req.is_https, strncasecmp(cases[i].raw + 4, "https", 5) == 0);
         CHECK(span_eq(req.authority, req.authority_len, cases[i].authority));
         CHECK(span_eq(req.path, req.path_len, cases[i].path));
         if (cases[i].query == NULL)
@@ -338,7 +342,9 @@ static const err_case_t err_cases[] = {
     {"400 relative target", "GET index.html HTTP/1.1\r\n" H "\r\n", 400},
     {"400 * with GET", "GET * HTTP/1.1\r\n" H "\r\n", 400},
     {"400 * with suffix", "OPTIONS *x HTTP/1.1\r\n" H "\r\n", 400},
-    {"400 https absolute", "GET https://a/ HTTP/1.1\r\n" H "\r\n", 400},
+    {"OK https absolute (형식상 허용, fproxy 가 501)", "GET https://a/ HTTP/1.1\r\n" H "\r\n", WANT_OK},
+    {"400 https 빈 authority", "GET https:///x HTTP/1.1\r\n" H "\r\n", 400},
+    {"400 ftp 스킴", "GET ftp://a/ HTTP/1.1\r\n" H "\r\n", 400},
     {"400 empty authority", "GET http:///x HTTP/1.1\r\n" H "\r\n", 400},
     {"400 CTL in target", "GET /a\x01" "b HTTP/1.1\r\n" H "\r\n", 400},
     {"400 DEL in target", "GET /a\x7f HTTP/1.1\r\n" H "\r\n", 400},
