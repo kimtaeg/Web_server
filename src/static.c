@@ -219,8 +219,8 @@ static int send_status(int fd, int status, int ka, int head, const buf_t *extra,
     return rc;
 }
 
-int static_handle(void *ctx, int fd, const http_request_t *req, int keep_alive,
-                  handler_result_t *res)
+int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+                  int keep_alive, handler_result_t *res)
 {
     const static_ctx_t *s = ctx;
     char real[PATH_MAX];
@@ -234,13 +234,15 @@ int static_handle(void *ctx, int fd, const http_request_t *req, int keep_alive,
     struct stat st;
     size_t remaining;
 
+    (void)ci;
     buf_init(&extra, 0, 16 * 1024);
     buf_init(&head, 0, 4096);
 
     status = resolve(s, req, real, &extra);
     if (status == 200) {
-        /* realpath 이후 마지막 구성요소가 링크로 바뀌는 경쟁(TOCTOU)을 O_NOFOLLOW 로 막는다 */
-        file = open(real, O_RDONLY | O_NOFOLLOW);
+        /* realpath 이후 마지막 구성요소가 링크로 바뀌는 경쟁(TOCTOU)을 O_NOFOLLOW 로 막는다.
+         * O_CLOEXEC: 다른 워커가 동시에 CGI 를 fork/exec 해도 이 fd 가 CGI 로 새지 않게 */
+        file = open(real, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (file < 0)
             status = errno_to_status(errno);
         else if (fstat(file, &st) != 0)

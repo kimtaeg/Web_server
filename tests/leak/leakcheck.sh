@@ -28,16 +28,22 @@ traffic() {
     curl -s -o /dev/null -X POST -d x "$(url /)"                                            # 405
     curl -s -o /dev/null -H 'Host:' "$(url /)"                                              # 400
     curl -s -o /dev/null -I "$(url /)"                                                      # HEAD
+    curl -s -o /dev/null "$(url '/cgi-bin/adder?a=1&b=2')"                                  # CGI
+    curl -s -o /dev/null -X POST --data-binary @"$WWW/big.bin" "$(url /cgi-bin/echo)"      # CGI + 본문
+    curl -s -o /dev/null "$(url '/cgi-bin/sleep?s=10')"                                     # CGI 타임아웃 → kill
+    curl -s -o /dev/null "$(url /cgi-bin/nope)"                                             # CGI 404
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"; printf 'GET / HTTP/1.1\r\nHo' >&5; exec 5>&-     # 중간 끊김
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"                                                    # 유휴 연결을 연 채로
     sleep 0.3                                                                             # SIGINT 를 맞게 한다
 }
 
 # start_server 를 쓰지 않고 직접 띄운다: leaks 가 서버를 자식으로 실행하기 때문
-launch() { # launch <명령...>; SERVER_PID 는 신호를 보낼 "서버 프로세스" pid
-    local i
+launch() { # launch <바이너리> <명령...>; SERVER_PID 는 신호를 보낼 "서버 프로세스" pid
+    local i cgi
+    cgi="$(cd "$(dirname "$1")" && pwd)/cgi-bin" # 서버 바이너리 옆에 빌드된 예제 CGI
+    shift
     PORT=$((20000 + (RANDOM % 20000)))
-    "$@" -H 127.0.0.1 -p "$PORT" -r "$WWW" -w 4 -q 16 -t 2000 >"$SERVER_LOG" 2>&1 &
+    "$@" -H 127.0.0.1 -p "$PORT" -r "$WWW" -g "$cgi" -c 1000 -w 4 -q 16 -t 2000 >"$SERVER_LOG" 2>&1 &
     LAUNCH_PID=$!
     for i in $(seq 1 100); do
         curl -s -o /dev/null --max-time 1 "$(url /)" && break
@@ -57,7 +63,7 @@ finish_run() { # SIGINT 후 종료 코드를 RUN_RC 에
 
 if [ "$(uname -s)" = "Darwin" ]; then
     echo "[leakcheck] macOS: leaks --atExit (debug 빌드)"
-    launch leaks --atExit -- "$DEBUG_BIN"
+    launch "$DEBUG_BIN" leaks --atExit -- "$DEBUG_BIN"
     traffic
     finish_run
     sed -n '/^Process [0-9]*: /,$p' "$SERVER_LOG" | grep -E "^Process|leaks for|total leaked|^Leak:" | head -20
@@ -67,11 +73,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
     cp "$SERVER_LOG" "$TMP/leaks.log"
 
     echo "[leakcheck] macOS: ASan 빌드 (메모리 오류 검사)"
-    launch "$ASAN_BIN"
+    launch "$ASAN_BIN" "$ASAN_BIN"
 else
     echo "[leakcheck] Linux: ASan + LeakSanitizer"
     export ASAN_OPTIONS=detect_leaks=1
-    launch "$ASAN_BIN"
+    launch "$ASAN_BIN" "$ASAN_BIN"
 fi
 traffic
 finish_run
@@ -84,5 +90,5 @@ else
     check "ASan: 오류 보고 없음" none none
 fi
 echo "--- 접근 로그 일부 ---"
-grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | head -6
+grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin| "GET / ' | head -8
 finish

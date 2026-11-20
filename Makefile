@@ -41,7 +41,7 @@ LDLIBS := -pthread
 
 # 구현이 끝난 모듈만 나열한다. 빈 모듈은 -pedantic 에서 "빈 번역 단위" 오류가 나므로
 # 각 단계에서 구현할 때 여기에 추가한다.
-MODULES := buf http_parser mime netio log http_response threadpool server conn static
+MODULES := buf http_parser mime netio log http_response threadpool server conn static router cgi
 
 BUILD     := build/$(MODE)
 LIB_OBJS  := $(patsubst %,$(BUILD)/obj/%.o,$(MODULES))
@@ -49,6 +49,9 @@ MAIN_OBJ  := $(BUILD)/obj/main.o
 BIN       := $(BUILD)/webserver
 TEST_SRCS := $(wildcard tests/unit/test_*.c)
 TEST_BINS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRCS))
+# 예제 CGI 프로그램: cgi-bin/*.c → build/<mode>/cgi-bin/<이름> (문서 루트 밖)
+CGI_SRCS  := $(wildcard cgi-bin/*.c)
+CGI_BINS  := $(patsubst cgi-bin/%.c,$(BUILD)/cgi-bin/%,$(CGI_SRCS))
 
 .PHONY: all debug asan test func leakcheck clean bin unit unit-run
 
@@ -73,7 +76,7 @@ leakcheck:
 func: bin
 	@set -e; for t in tests/func/*.sh; do case $$t in */lib.sh) continue;; esac; bash $$t $(BIN); done
 
-bin: $(BIN)
+bin: $(BIN) $(CGI_BINS)
 
 unit: $(TEST_BINS)
 
@@ -92,7 +95,11 @@ $(BUILD)/tests/%: tests/unit/%.c $(LIB_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LDLIBS)
 
+$(BUILD)/cgi-bin/%: cgi-bin/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 clean:
 	rm -rf build
 
--include $(LIB_OBJS:.o=.d) $(MAIN_OBJ:.o=.d) $(TEST_BINS:=.d)
+-include $(LIB_OBJS:.o=.d) $(MAIN_OBJ:.o=.d) $(TEST_BINS:=.d) $(CGI_BINS:=.d)

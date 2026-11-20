@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdint.h>
@@ -61,6 +62,7 @@ int server_listen(const char *host, int port, int backlog)
         log_msg(LOG_ERROR, "socket() 실패: %s (errno %d)", strerror(e), e);
         goto fail;
     }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC); /* 리슨 소켓이 CGI 로 새지 않게 */
     /* 재시작 직후 이전 연결이 TIME_WAIT 이어도 같은 포트에 bind 할 수 있게 한다. */
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0) {
         e = errno;
@@ -136,7 +138,12 @@ int server_run(int lfd, threadpool_t *tp, volatile sig_atomic_t *stop)
             log_msg(LOG_ERROR, "accept 실패: %s (errno %d)", strerror(e), e);
             return -1;
         }
-        if (platform_sock_init(cfd) != 0) {
+        /*
+         * FD_CLOEXEC: 워커가 CGI 를 fork/exec 할 때 이 클라이언트 소켓이 CGI 프로세스로 새면,
+         * CGI 가 끝날 때까지 연결이 닫히지 않는다. (accept4 는 POSIX 가 아니라 macOS 에 없어서
+         * accept 직후 fcntl 로 건다. 그 사이 다른 스레드가 fork 하는 아주 짧은 창은 남는다.)
+         */
+        if (fcntl(cfd, F_SETFD, FD_CLOEXEC) != 0 || platform_sock_init(cfd) != 0) {
             close(cfd);
             continue;
         }

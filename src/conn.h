@@ -20,12 +20,17 @@ typedef struct {
     int close;    /* 핸들러가 연결을 끊어야 한다고 판단 (예: 약속한 Content-Length 를 못 채움) */
 } handler_result_t;
 
+/* 연결 단위 정보. 요청 단위가 아니라서 http_request_t 와 분리했다. */
+typedef struct {
+    const char *ip; /* 상대 IP 문자열 ("127.0.0.1", "::1", 알 수 없으면 "-") */
+} conn_info_t;
+
 /*
  * 응답을 fd 로 직접 보낸다. keep_alive 는 conn 이 결정한 값이며, 핸들러는 그대로
  * Connection 헤더에 반영해야 한다. 반환 0 = 정상, -1 = I/O 실패(연결 종료).
  */
-typedef int (*conn_handler_fn)(void *ctx, int fd, const http_request_t *req, int keep_alive,
-                               handler_result_t *res);
+typedef int (*conn_handler_fn)(void *ctx, int fd, const http_request_t *req,
+                               const conn_info_t *ci, int keep_alive, handler_result_t *res);
 
 typedef struct {
     http_limits_t limits;
