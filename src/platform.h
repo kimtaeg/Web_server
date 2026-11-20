@@ -53,6 +53,6 @@ static inline int platform_sock_init(int fd)
 #error "지원하지 않는 플랫폼 (Linux, macOS 만 지원)"
 #endif
 
-/* sendfile 시그니처 차이는 정적 파일을 구현하는 2단계에서 여기에 추가한다. */
+/* 정적 파일은 고정 버퍼 read/send 로 보내므로 sendfile 분기는 두지 않는다 (DESIGN.md 7절). */
 
 #endif /* PLATFORM_H */
