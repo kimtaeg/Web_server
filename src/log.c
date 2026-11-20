@@ -62,12 +62,16 @@ void log_msg(log_level_t lvl, const char *fmt, ...)
     va_end(ap);
 }
 
-void log_access(const char *method, const char *target, size_t target_len, int status,
-                size_t bytes, long ms)
+void log_access(const char *ip, const char *method, const char *target, size_t target_len,
+                int version_minor, int status, size_t bytes, long ms)
 {
     /* target 은 파서가 출력 가능한 ASCII 만 허용했으므로 로그 주입(개행 삽입) 걱정이 없다. */
     int tl = (int)(target_len > LOG_TARGET_MAX ? LOG_TARGET_MAX : target_len);
 
-    log_msg(LOG_INFO, "%s %.*s%s %d %zuB %ldms", method, tl, target,
-            target_len > LOG_TARGET_MAX ? "..." : "", status, bytes, ms);
+    if (method == NULL) {
+        log_msg(LOG_INFO, "%s \"-\" %d %zuB %ldms", ip ? ip : "-", status, bytes, ms);
+        return;
+    }
+    log_msg(LOG_INFO, "%s \"%s %.*s%s HTTP/1.%d\" %d %zuB %ldms", ip ? ip : "-", method, tl, target,
+            target_len > LOG_TARGET_MAX ? "..." : "", version_minor, status, bytes, ms);
 }

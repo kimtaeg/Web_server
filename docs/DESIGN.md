@@ -184,7 +184,56 @@ HTTP/1.1은 기본적으로 유지하고 `Connection: close`면 끊는다. HTTP/
   전송 도중 파일이 줄어들면 약속한 Content-Length를 채울 수 없으므로 연결을 끊어서 알린다.
 - **HEAD**: GET과 같은 헤더(같은 Content-Length)를 보내고 본문은 보내지 않는다.
 
-## 8. 테스트
+## 8. 종료, 시그널, 로그
+
+### 시그널 핸들러는 플래그만 세운다
+- SIGINT와 SIGTERM이 오면 `volatile sig_atomic_t g_stop = 1` 한 줄만 실행한다.
+- **왜**: 핸들러는 메인 코드가 어느 지점에 있든 끼어든다. 예를 들어 malloc이나 로그 락을 잡고
+  있는 도중일 수도 있다. 그 상태에서 핸들러가 같은 락을 잡거나 free를 부르면 교착이나 힙 손상이
+  생긴다. 그래서 async-signal-safe한 일(플래그 대입)만 하고, 실제 정리는 메인 흐름이 한다.
+- `sigaction`을 `SA_RESTART` 없이 등록한다. 블록 중인 시스템 콜이 EINTR로 깨어나 플래그를 보게 하기 위해서다.
+- **accept 루프는 `poll(500ms)`로 기다린다.** "플래그 확인 → accept 진입" 사이에 시그널이 오면
+  EINTR이 나지 않고 다음 연결이 올 때까지 잠들 수 있다. poll 타임아웃이 이 경쟁 조건을 덮는다.
+- **SIGPIPE**는 두 겹으로 막는다: 프로세스 전체에 `SIG_IGN`을 걸고, 소켓마다
+  `MSG_NOSIGNAL`(Linux) 또는 `SO_NOSIGPIPE`(macOS)를 쓴다 (1절).
+
+### graceful shutdown 순서
+| 단계 | 하는 일 | 이 순서인 이유 |
+|---|---|---|
+| 1 | 리슨 소켓 close | 새 연결을 더 받지 않는다 |
+| 2 | 큐 close (`threadpool_close`) | submit을 막고 잠든 워커를 전부 깨운다(broadcast). 블록하지 않는다 |
+| 3 | 진행 중 요청 완료 | 워커는 처리 중인 요청과 **큐에 이미 들어온 연결**까지 끝낸다. keep-alive로 대기 중인 연결은 250ms 안에 플래그를 보고 닫는다 |
+| 4 | join (`threadpool_join_free`) | 모든 워커가 끝나야 공유 자원을 쓰는 스레드가 없어진다 |
+| 5 | 자원 해제 | 4 이후에만 큐·mutex·cond를 free해도 안전하다. 순서를 바꾸면 워커가 해제된 mutex를 잡는다(use-after-free) |
+
+- 큐에 남은 연결을 버리지 않고 처리한다. 이미 accept한 연결이므로, 버리면 클라이언트는 이유 없이 끊긴 것처럼 보인다.
+- `threadpool_join_free`는 안전장치로 내부에서 close를 한 번 더 부른다(close는 멱등).
+  close를 빠뜨려도 워커가 끝나지 않아 영원히 join하는 일이 없다.
+
+### 접근 로그
+```
+2026-11-20 11:34:00.359 [INFO] 127.0.0.1 "GET /big.bin HTTP/1.1" 200 500162B 2ms
+```
+- 시간, IP(`getpeername` + `inet_ntop`, IPv4/IPv6), 요청줄, 상태, 보낸 바이트, 처리 시간을 남긴다.
+  파싱 오류로 요청줄을 알 수 없으면 `"-"`로 쓴다.
+- **스레드 안전성**: 전역 mutex 하나로 "한 줄 쓰기"를 통째로 직렬화한다. stdio의 내부 락은 호출
+  단위라서, 여러 번 호출해 한 줄을 만들면 그 사이에 다른 스레드가 끼어든다. 8개 스레드 × 300줄로
+  줄이 섞이지 않음을 테스트한다.
+- 시간은 `localtime_r`로 구한다. `localtime`은 정적 버퍼를 공유해서 스레드 안전하지 않다.
+- 대상 경로는 256바이트에서 자른다. 파서가 출력 가능한 ASCII만 허용하므로 로그 주입(개행 삽입)은 불가능하다.
+
+### 검증
+- **중간 끊김 (`tests/func/abort.sh`)**: 워커 1개, 유휴 타임아웃 30초로 띄운다. nc로 헤더 일부나
+  본문 일부만 보내고 끊기, 즉시 끊기, 빈 연결을 합쳐 60번 만든 직후 curl이 바로 200을 받는지,
+  `lsof`로 센 fd 개수가 처음과 같은지 확인한다.
+  EOF를 무시하도록 일부러 고친 바이너리에서는 503과 fd 누수(8개 → 12개)로 실패하는 것도 확인했다.
+- **누수 (`make leakcheck`)**: 서버 실행 → 정상, 오류, keep-alive, 중간 끊김, 유휴 연결 → SIGINT.
+  - macOS(arm64)의 ASan은 LeakSanitizer가 없다. 그래서 `leaks --atExit`(debug 빌드)로 누수를 보고,
+    같은 시나리오를 ASan 빌드로 돌려 메모리 오류를 확인한다.
+  - Linux에서는 ASan + LSan 하나로 둘 다 확인한다.
+  - `buf_free` 하나를 지운 바이너리에서 `11 leaks for 112640 total leaked bytes`로 실패하는 것도 확인했다.
+
+## 9. 테스트
 - 외부 라이브러리 없이 `tests/unit/test.h`의 매크로(`CHECK`, `REQUIRE`, `CHECK_EQ_*`)를 쓴다.
 - 테스트 파일 하나 = 실행 파일 하나. 크래시나 시그널이 다른 테스트에 번지지 않는다.
   `tests/run_unit.sh`가 종료 코드로 성공/실패를 모은다.

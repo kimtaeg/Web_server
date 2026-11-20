@@ -4,6 +4,8 @@
  */
 #include "test.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -251,6 +253,47 @@ static void test_stop_flag(void)
     buf_free(&out);
 }
 
+/*
+ * 클라이언트가 요청을 보내다 말고 끊는 경우.
+ * 유휴 타임아웃을 10초로 길게 두고, conn_handle 이 그보다 훨씬 빨리 반환하는지 본다.
+ * (빨리 반환 = recv 가 EOF 를 감지해 워커가 풀려났다는 뜻. 타임아웃까지 붙잡혀 있지 않음)
+ * fd 가 실제로 닫혔는지는 같은 번호를 다시 fcntl 해서 EBADF 인지로 확인한다.
+ */
+static void test_client_aborts_mid_request(void)
+{
+    static const char *partials[] = {
+        "GET / HTTP/1.1\r\nHo",                                         /* 헤더 중간 */
+        "GET /aaaaaaaaaaaaaaaaaaaaaaaa",                                /* 요청줄 중간 */
+        "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 100\r\n\r\nab", /* 본문 중간 */
+        "",                                                             /* 아무것도 안 보냄 */
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof partials / sizeof partials[0]; i++) {
+        conn_config_t cfg;
+        conn_arg_t a;
+        pthread_t th;
+        int sv[2];
+        long t0, ms;
+
+        default_cfg(&cfg);
+        cfg.idle_timeout_ms = 10000;
+        REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        a.fd = sv[0];
+        a.cfg = cfg;
+        t0 = ms_now();
+        pthread_create(&th, NULL, conn_main, &a);
+        send_all(sv[1], partials[i], strlen(partials[i]));
+        close(sv[1]); /* 요청 중간에 끊음 */
+        pthread_join(th, NULL);
+        ms = ms_now() - t0;
+        if (ms >= 1000)
+            fprintf(stderr, "    partial #%zu: %ldms\n", i, ms);
+        CHECK(ms < 1000);
+        CHECK(fcntl(sv[0], F_GETFD) == -1 && errno == EBADF); /* 서버 쪽 fd 회수됨 */
+    }
+}
+
 int main(void)
 {
     FILE *devnull = fopen("/dev/null", "w");
@@ -264,6 +307,7 @@ int main(void)
     RUN_TEST(test_keep_alive_survives_between_requests);
     RUN_TEST(test_max_requests);
     RUN_TEST(test_stop_flag);
+    RUN_TEST(test_client_aborts_mid_request);
     log_init(LOG_INFO, NULL);
     if (devnull)
         fclose(devnull);

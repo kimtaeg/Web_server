@@ -41,16 +41,20 @@ static void test_level_filter_and_format(void)
     log_init(LOG_WARN, f);
     log_msg(LOG_INFO, "hidden");
     log_msg(LOG_WARN, "shown %d", 42);
-    log_access("GET", "/index.html?x", 11, 200, 1234, 5);
+    log_access("127.0.0.1", "GET", "/index.html?x", 11, 1, 200, 1234, 5);
     read_all(f, buf, sizeof buf);
     CHECK(strstr(buf, "hidden") == NULL);
     CHECK(strstr(buf, "[WARN] shown 42\n") != NULL);
     CHECK(strstr(buf, "GET /index.html") == NULL); /* 접근 로그는 INFO → 걸러짐 */
 
     log_init(LOG_INFO, f);
-    log_access("GET", "/index.html?x", 11, 200, 1234, 5); /* target_len 만큼만 */
+    log_access("127.0.0.1", "GET", "/index.html?x", 11, 1, 200, 1234, 5); /* target_len 만큼만 */
+    log_access("::1", "HEAD", "/", 1, 0, 404, 0, 0);
+    log_access("10.0.0.7", NULL, NULL, 0, 0, 400, 150, 0); /* 파싱 오류 */
     read_all(f, buf, sizeof buf);
-    CHECK(strstr(buf, "[INFO] GET /index.html 200 1234B 5ms\n") != NULL);
+    CHECK(strstr(buf, "[INFO] 127.0.0.1 \"GET /index.html HTTP/1.1\" 200 1234B 5ms\n") != NULL);
+    CHECK(strstr(buf, "[INFO] ::1 \"HEAD / HTTP/1.0\" 404 0B 0ms\n") != NULL);
+    CHECK(strstr(buf, "[INFO] 10.0.0.7 \"-\" 400 150B 0ms\n") != NULL);
     log_init(LOG_INFO, NULL);
     fclose(f);
 }
@@ -64,9 +68,9 @@ static void test_long_target_truncated(void)
     REQUIRE(f != NULL);
     memset(target, 'a', sizeof target);
     log_init(LOG_INFO, f);
-    log_access("GET", target, sizeof target, 414, 0, 0);
+    log_access("1.2.3.4", "GET", target, sizeof target, 1, 414, 0, 0);
     read_all(f, buf, sizeof buf);
-    CHECK(strstr(buf, "... 414") != NULL);
+    CHECK(strstr(buf, "... HTTP/1.1\" 414") != NULL);
     CHECK(strlen(buf) < 400);
     log_init(LOG_INFO, NULL);
     fclose(f);

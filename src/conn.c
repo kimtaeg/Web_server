@@ -3,6 +3,9 @@
  */
 #include "conn.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -52,6 +55,24 @@ static ssize_t wait_recv(int fd, char *tmp, size_t n, const conn_config_t *cfg)
     }
 }
 
+/* 접근 로그용 상대 IP. IPv4/IPv6 가 아니면(테스트의 socketpair 등) "-". */
+static void peer_ip(int fd, char *out, size_t n)
+{
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    const void *addr = NULL;
+
+    snprintf(out, n, "-");
+    if (getpeername(fd, (struct sockaddr *)&ss, &len) != 0)
+        return;
+    if (ss.ss_family == AF_INET)
+        addr = &((struct sockaddr_in *)&ss)->sin_addr;
+    else if (ss.ss_family == AF_INET6)
+        addr = &((struct sockaddr_in6 *)&ss)->sin6_addr;
+    if (addr == NULL || inet_ntop(ss.ss_family, addr, out, (socklen_t)n) == NULL)
+        snprintf(out, n, "-");
+}
+
 /*
  * 바로 close 하면, 아직 읽지 않은 입력이 커널 버퍼에 남아 있을 때 TCP 가 RST 를 보낸다.
  * 그러면 클라이언트가 직전에 보낸 응답(예: 400)을 읽기 전에 연결 리셋으로 버릴 수 있다.
@@ -75,6 +96,7 @@ static void linger_close(int fd, char *tmp, size_t n)
 void conn_handle(int fd, const conn_config_t *cfg)
 {
     char tmp[RECV_CHUNK];
+    char ip[INET6_ADDRSTRLEN];
     http_parser_t parser;
     http_request_t req;
     buf_t in;
@@ -83,6 +105,7 @@ void conn_handle(int fd, const conn_config_t *cfg)
     size_t cap = cfg->limits.max_uri + cfg->limits.max_header_bytes + cfg->limits.max_body +
                  2 * RECV_CHUNK;
 
+    peer_ip(fd, ip, sizeof ip);
     if (buf_init(&in, 4096, cap) != BUF_OK)
         goto cleanup;
     if (cfg->send_timeout_ms > 0)
@@ -116,7 +139,7 @@ void conn_handle(int fd, const conn_config_t *cfg)
 
             /* 요청 경계를 잃었으므로 이 연결로는 더 진행할 수 없다 → 항상 close */
             http_response_status_page(fd, st, 0, 0, NULL, &sent);
-            log_access("-", "-", 1, st, sent, 0);
+            log_access(ip, NULL, NULL, 0, 0, st, sent, 0);
             goto cleanup;
         }
 
@@ -126,8 +149,8 @@ void conn_handle(int fd, const conn_config_t *cfg)
         t0 = now_ms();
         if (cfg->handler(cfg->handler_ctx, fd, &req, ka, &res) != 0)
             res.close = 1;
-        log_access(http_method_name(req.method), req.target, req.target_len, res.status, res.bytes,
-                   now_ms() - t0);
+        log_access(ip, http_method_name(req.method), req.target, req.target_len, req.version_minor,
+                   res.status, res.bytes, now_ms() - t0);
         if (!ka || res.close)
             goto cleanup;
         buf_consume(&in, used); /* 처리한 요청만 덜어내고 남은 바이트(다음 요청)는 보존 */

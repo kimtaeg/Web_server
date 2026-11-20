@@ -142,13 +142,30 @@ int main(int argc, char **argv)
     log_msg(LOG_INFO, "listening on http://%s:%ld  root=%s  workers=%ld queue=%ld idle=%ldms", host,
             port, sctx.root, workers, queue, idle_ms);
     rc = server_run(lfd, tp, &g_stop) == 0 ? 0 : 1;
-    log_msg(LOG_INFO, "종료 중: 진행 중인 요청을 마무리합니다");
+    log_msg(LOG_INFO, "종료 시작 (signal)");
 
 cleanup:
-    if (lfd >= 0)
-        close(lfd); /* 먼저 닫아서 새 연결을 더 받지 않는다 */
-    threadpool_destroy(tp); /* 큐에 남은 연결까지 처리한 뒤 워커 join */
-    if (rc == 0)
-        log_msg(LOG_INFO, "정상 종료");
+    /*
+     * graceful shutdown 순서 — 각 단계가 앞 단계에 의존한다:
+     * 1. 리슨 소켓 close  : 새 연결을 더 받지 않는다. (커널 backlog 에서 아직 accept 안 된
+     *                       연결은 클라이언트 쪽에서 RST 를 받는다)
+     * 2. 큐 close          : submit 을 막고 잠든 워커를 전부 깨운다.
+     * 3. 진행 중 요청 완료 : 워커는 처리 중인 요청과 큐에 남은 연결을 끝낸다.
+     *                       keep-alive 대기 중인 연결은 conn 이 250ms 안에 종료 플래그를 보고 닫는다.
+     * 4. join              : 모든 워커가 끝날 때까지 기다린다. 이후로는 공유 자원을 쓰는 스레드가 없다.
+     * 5. 자원 해제         : 그래서 이 시점에만 풀·큐·동기화 객체를 안전하게 free 할 수 있다.
+     */
+    if (lfd >= 0) {
+        close(lfd);
+        log_msg(LOG_INFO, "종료 1/4: 리슨 소켓 닫음");
+    }
+    if (tp != NULL) {
+        threadpool_close(tp);
+        log_msg(LOG_INFO, "종료 2/4: 작업 큐 닫음, 워커 깨움 (진행 중 요청 마무리 대기)");
+        threadpool_join_free(tp);
+        tp = NULL;
+        log_msg(LOG_INFO, "종료 3/4: 워커 전부 join, 풀 해제");
+    }
+    log_msg(LOG_INFO, "종료 4/4: %s", rc == 0 ? "정상 종료" : "오류로 종료");
     return rc;
 }
