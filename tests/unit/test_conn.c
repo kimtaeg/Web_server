@@ -296,6 +296,93 @@ static void test_client_aborts_mid_request(void)
     }
 }
 
+/*
+ * slowloris: 헤더를 100ms 에 1바이트씩. idle_timeout(2초)은 바이트마다 다시 시작되므로 걸리지 않는다.
+ * 헤더 마감(header_timeout)만이 이 연결을 끊을 수 있다.
+ *   header_timeout = 600ms → 약 0.6초 뒤 408 + 종료
+ *   header_timeout = 0(끔) → 3초 동안 계속 붙잡혀 있다 (= 방어가 없을 때의 문제를 재현)
+ */
+static long slowloris(int header_timeout_ms, buf_t *got)
+{
+    const char *req = "GET / HTTP/1.1\r\nHost: a\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n";
+    conn_config_t cfg;
+    conn_arg_t a;
+    pthread_t th;
+    int sv[2];
+    long t0, ms = -1;
+    size_t i;
+
+    default_cfg(&cfg);
+    cfg.idle_timeout_ms = 2000;
+    cfg.header_timeout_ms = header_timeout_ms;
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    a.fd = sv[0];
+    a.cfg = cfg;
+    t0 = ms_now();
+    pthread_create(&th, NULL, conn_main, &a);
+    buf_reset(got);
+    for (i = 0; i < strlen(req) && ms_now() - t0 < 3000; i++) {
+        char tmp[1024];
+        ssize_t n;
+        struct timespec ts = {0, 100 * 1000 * 1000};
+
+        if (send_all(sv[1], req + i, 1) < 0)
+            break; /* 서버가 이미 닫음 */
+        n = recv_some(sv[1], tmp, sizeof tmp, 0);
+        if (n > 0) {
+            buf_append(got, tmp, (size_t)n);
+            break;
+        }
+        if (n == 0)
+            break;
+        nanosleep(&ts, NULL);
+    }
+    if (got->len > 0 || ms_now() - t0 < 3000) {
+        char tmp[1024];
+        ssize_t n;
+
+        while ((n = recv_some(sv[1], tmp, sizeof tmp, 1000)) > 0)
+            buf_append(got, tmp, (size_t)n);
+        ms = ms_now() - t0;
+    }
+    close(sv[1]); /* 끔(0) 인 경우: 여기서 끊어야 conn 이 끝난다 */
+    pthread_join(th, NULL);
+    close(sv[0]);
+    return ms;
+}
+
+static void test_slowloris_header_deadline(void)
+{
+    buf_t got;
+    long ms;
+
+    buf_init(&got, 0, 1 << 16);
+    ms = slowloris(600, &got);
+    CHECK(got.len > 0 && strncmp(got.data, "HTTP/1.1 408 Request Timeout\r\n", 30) == 0);
+    CHECK(strstr(got.data ? got.data : "", "Connection: close") != NULL);
+    CHECK(ms >= 500 && ms < 1500); /* idle(2초)이 아니라 헤더 마감(0.6초)에 끊김 */
+
+    /* 방어를 끄면 3초가 지나도 응답이 없다 (서버가 계속 붙잡혀 있음) */
+    ms = slowloris(0, &got);
+    CHECK_EQ_SIZE(got.len, 0);
+    CHECK_EQ_INT(ms, -1);
+    buf_free(&got);
+}
+
+/* 느리지만 마감 안에 끝나는 정상 요청은 통과해야 한다 */
+static void test_slow_but_within_deadline(void)
+{
+    conn_config_t cfg;
+    buf_t out;
+
+    default_cfg(&cfg);
+    cfg.header_timeout_ms = 3000;
+    buf_init(&out, 0, 1 << 16);
+    run_session(&cfg, "GET /ok HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n", 4, &out);
+    CHECK(strncmp(out.data ? out.data : "", "HTTP/1.1 200 OK", 15) == 0);
+    buf_free(&out);
+}
+
 int main(void)
 {
     FILE *devnull = fopen("/dev/null", "w");
@@ -310,6 +397,8 @@ int main(void)
     RUN_TEST(test_max_requests);
     RUN_TEST(test_stop_flag);
     RUN_TEST(test_client_aborts_mid_request);
+    RUN_TEST(test_slowloris_header_deadline);
+    RUN_TEST(test_slow_but_within_deadline);
     log_init(LOG_INFO, NULL);
     if (devnull)
         fclose(devnull);

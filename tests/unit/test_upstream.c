@@ -4,6 +4,7 @@
 #include "test.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -456,6 +457,18 @@ static void test_relay_capture(void)
     close(cl[0]); close(cl[1]); close(up[0]); close(up[1]);
 }
 
+/* 로컬 자원 오류 분류: 이 경우 백엔드를 down 으로 표시하면 안 된다 */
+static void test_local_error_classification(void)
+{
+    CHECK(upstream_is_local_error(EADDRNOTAVAIL)); /* 임시 포트 고갈 (TIME_WAIT) */
+    CHECK(upstream_is_local_error(EMFILE));
+    CHECK(upstream_is_local_error(ENFILE));
+    CHECK(upstream_is_local_error(ENOBUFS));
+    CHECK(!upstream_is_local_error(ECONNREFUSED)); /* 백엔드가 안 듣고 있음 → 백엔드 탓 */
+    CHECK(!upstream_is_local_error(ETIMEDOUT));
+    CHECK(!upstream_is_local_error(EHOSTUNREACH));
+}
+
 int main(void)
 {
     signal(SIGPIPE, SIG_IGN);
@@ -470,5 +483,6 @@ int main(void)
     RUN_TEST(test_relay_errors);
     RUN_TEST(test_via_loop_detection);
     RUN_TEST(test_relay_capture);
+    RUN_TEST(test_local_error_classification);
     TEST_END();
 }

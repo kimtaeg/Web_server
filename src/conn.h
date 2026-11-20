@@ -34,7 +34,13 @@ typedef int (*conn_handler_fn)(void *ctx, int fd, const http_request_t *req,
 
 typedef struct {
     http_limits_t limits;
-    int idle_timeout_ms; /* 요청 바이트를 기다리는 최대 시간 (유휴 + 느린 송신 방어) */
+    int idle_timeout_ms;   /* recv 한 번을 기다리는 최대 시간 (바이트가 오면 다시 센다) */
+    /*
+     * 요청의 첫 바이트부터 헤더 끝(빈 줄)까지 허용하는 총 시간. 0 이면 끔.
+     * idle_timeout 만으로는 slowloris(헤더를 idle 보다 짧은 간격으로 1바이트씩)를 막지 못한다:
+     * 바이트가 올 때마다 idle 타이머가 다시 시작되기 때문. 이 마감은 다시 시작되지 않는다. 초과 → 408.
+     */
+    int header_timeout_ms;
     int send_timeout_ms; /* SO_SNDTIMEO: 응답을 읽지 않는 클라이언트 방어 */
     int max_requests;    /* 연결당 최대 요청 수. 마지막 응답에 Connection: close */
     conn_handler_fn handler;

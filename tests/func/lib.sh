@@ -118,7 +118,22 @@ status_of() { # status_of <경로> [curl 옵션...]
     curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$@" "$(url "$p")"
 }
 
+# 서버 로그에 메모리 검사 도구의 오류가 있으면 실패로 잡는다 (ASan/UBSan/LSan, valgrind 래퍼).
+# 오류가 로그에만 찍히고 기능 검사는 통과해 버리는 일을 막는다.
+check_tool_errors() {
+    local f hits=""
+    for f in "$TMP"/*.log; do
+        [ -f "$f" ] || continue
+        if grep -qE 'ERROR: (AddressSanitizer|LeakSanitizer)|runtime error:' "$f"; then
+            hits="$hits $(basename "$f")"
+            grep -E -A8 'ERROR: |runtime error:' "$f" | head -20
+        fi
+    done
+    check "메모리 검사 도구 오류 없음 (서버 로그)" "" "$hits"
+}
+
 finish() {
+    check_tool_errors
     echo "==== $(basename "$0"): $PASS passed, $FAIL failed ===="
     [ "$FAIL" -eq 0 ]
 }

@@ -13,7 +13,9 @@
 #include "buf.h"
 
 #define HTTP_SERVER_NAME "cweb/0.2"
-#define HTTP_DATE_LEN 30 /* "Sun, 06 Nov 1994 08:49:37 GMT" + NUL */
+/* "Sun, 06 Nov 1994 08:49:37 GMT" 은 29자지만, gcc -Wformat-truncation 은 int 필드를 최악(11자리)으로
+ * 계산하므로 그 경우까지 들어가는 크기로 둔다 */
+#define HTTP_DATE_LEN 80
 
 const char *http_status_reason(int status);
 

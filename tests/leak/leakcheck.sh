@@ -80,10 +80,16 @@ launch() { # launch <바이너리> <명령...>; SERVER_PID 는 신호를 보낼 
 }
 
 finish_run() { # SIGINT 후 종료 코드를 RUN_RC 에
+    local target=$SERVER_PID
     kill -INT "$SERVER_PID"
     wait "$LAUNCH_PID"
     RUN_RC=$?
     exec 5>&- 2>/dev/null
+    # leaks --atExit 는 검사 동안 대상 프로세스를 정지(T)시키고, 검사가 끝나도 그대로 남겨 둔다
+    # (실측: 정지된 고아 프로세스가 실행마다 하나씩 쌓였다). 검사가 끝났으니 확실히 정리한다.
+    if [ "$target" != "$LAUNCH_PID" ] && kill -0 "$target" 2>/dev/null; then
+        kill -KILL "$target" 2>/dev/null
+    fi
     SERVER_PID=""
 }
 

@@ -48,6 +48,7 @@ static void usage(const char *prog)
             "  -w  워커 스레드 수 (기본 8)\n"
             "  -q  대기 큐 길이 (기본 64, 가득 차면 503)\n"
             "  -t  유휴 타임아웃 ms (기본 5000)\n"
+            "  -T  헤더 마감 ms: 요청 첫 바이트부터 헤더 끝까지 (기본 10000, slowloris 방어)\n"
             "  -m  연결당 최대 요청 수 (기본 100)\n"
             "  -g  CGI 디렉터리: /cgi-bin/<이름> 을 여기서 실행 (없으면 CGI 비활성)\n"
             "  -c  CGI 타임아웃 ms (기본 5000, 초과 시 504)\n"
@@ -113,8 +114,8 @@ static int extract_long_name(int argc, char **argv, char **out, const char **nam
 /* 명령줄에서 받은 값. set_* 가 1 인 것만 설정 파일 값을 덮어쓴다. */
 typedef struct {
     const char *config_path, *host, *root, *cgi_dir, *name;
-    long port, workers, queue, idle, maxreq, cgi_ms;
-    int set_port, set_workers, set_queue, set_idle, set_maxreq, set_cgi_ms, verbose;
+    long port, workers, queue, idle, hdr, maxreq, cgi_ms;
+    int set_port, set_workers, set_queue, set_idle, set_hdr, set_maxreq, set_cgi_ms, verbose;
 } cli_t;
 
 static void apply_cli(config_t *c, const cli_t *o)
@@ -135,6 +136,8 @@ static void apply_cli(config_t *c, const cli_t *o)
         c->queue = o->queue;
     if (o->set_idle)
         c->idle_timeout_ms = o->idle;
+    if (o->set_hdr)
+        c->header_timeout_ms = o->hdr;
     if (o->set_maxreq)
         c->max_requests = o->maxreq;
     if (o->set_cgi_ms)
@@ -177,7 +180,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    while ((opt = getopt(nargs, args, "f:H:p:r:w:q:t:m:g:c:n:vh")) != -1) {
+    while ((opt = getopt(nargs, args, "f:H:p:r:w:q:t:T:m:g:c:n:vh")) != -1) {
         int bad = 0;
 
         switch (opt) {
@@ -190,6 +193,7 @@ int main(int argc, char **argv)
         case 'w': bad = parse_long(optarg, 1, 1024, &cli.workers); cli.set_workers = 1; break;
         case 'q': bad = parse_long(optarg, 1, 65536, &cli.queue); cli.set_queue = 1; break;
         case 't': bad = parse_long(optarg, 1, 3600 * 1000, &cli.idle); cli.set_idle = 1; break;
+        case 'T': bad = parse_long(optarg, 0, 3600 * 1000, &cli.hdr); cli.set_hdr = 1; break;
         case 'm': bad = parse_long(optarg, 1, 1000000, &cli.maxreq); cli.set_maxreq = 1; break;
         case 'c': bad = parse_long(optarg, 1, 3600 * 1000, &cli.cgi_ms); cli.set_cgi_ms = 1; break;
         case 'v': cli.verbose = 1; break;
@@ -286,6 +290,7 @@ int main(int argc, char **argv)
     memset(&ccfg, 0, sizeof ccfg);
     ccfg.limits = default_limits;
     ccfg.idle_timeout_ms = (int)cfg.idle_timeout_ms;
+    ccfg.header_timeout_ms = (int)cfg.header_timeout_ms;
     ccfg.send_timeout_ms = 10000;
     ccfg.max_requests = (int)cfg.max_requests;
     ccfg.handler = router_handle;

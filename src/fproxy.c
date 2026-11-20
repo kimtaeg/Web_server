@@ -255,7 +255,7 @@ static int connect_any(const char *host, int port, int timeout_ms)
      * 첫 주소(::1)는 거부되므로 다음 주소로 넘어가야 한다. */
     for (p = ai; p != NULL; p = p->ai_next) {
         fd = upstream_connect(p->ai_addr, p->ai_addrlen, timeout_ms);
-        if (fd >= 0)
+        if (fd >= 0 || fd == UPSTREAM_ELOCAL) /* 로컬 자원 부족이면 다른 주소도 같은 결과 */
             break;
     }
     freeaddrinfo(ai);
@@ -319,7 +319,10 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     /* 2) 대상에 연결 */
     ufd = connect_any(host, port, f->connect_timeout_ms);
     if (ufd < 0) {
-        rc = reply(fd, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, miss, res);
+        if (ufd == UPSTREAM_ELOCAL) /* 우리 쪽 임시 포트/fd 고갈 → 잠시 후 재시도 안내 */
+            rc = reply(fd, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
+        else
+            rc = reply(fd, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, miss, res);
         goto cleanup;
     }
 

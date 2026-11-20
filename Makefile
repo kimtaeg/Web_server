@@ -5,6 +5,8 @@
 #   make asan        : ASan + UBSan 으로 바이너리와 단위 테스트를 빌드하고 테스트 실행
 #   make func        : 기능 테스트 (서버를 띄우고 curl 로 검증, tests/func/*.sh)
 #   make leakcheck   : 서버 실행 → 요청 → SIGINT → 누수 0 확인
+#   make func-asan   : 기능 테스트 전체를 ASan 빌드 서버로
+#   make valgrind    : (Linux) 단위 + 기능 테스트를 valgrind 로, 오류·누수 0 확인
 #   make clean       : build/ 삭제
 #
 # 모드마다 build/<mode>/ 에 따로 빌드한다. 같은 .o 를 다른 플래그로 섞어 링크하는 사고를 막기 위해서다.
@@ -53,7 +55,7 @@ TEST_BINS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRCS))
 CGI_SRCS  := $(wildcard cgi-bin/*.c)
 CGI_BINS  := $(patsubst cgi-bin/%.c,$(BUILD)/cgi-bin/%,$(CGI_SRCS))
 
-.PHONY: all debug asan test func leakcheck clean bin unit unit-run
+.PHONY: all debug asan test func func-asan valgrind leakcheck clean bin unit unit-run
 
 all: bin
 
@@ -65,6 +67,18 @@ test:
 
 asan:
 	@$(MAKE) --no-print-directory MODE=asan bin unit-run SAN=1
+
+# 기능 테스트 전체를 ASan+UBSan 빌드 서버로 (서버 로그의 sanitizer 오류는 lib.sh 가 실패로 잡는다)
+func-asan:
+	@$(MAKE) --no-print-directory MODE=asan bin
+	@set -e; for t in tests/func/*.sh; do case $$t in */lib.sh) continue;; esac; \
+		$(SAN_ENV) bash $$t build/asan/webserver; done
+
+# valgrind (Linux 전용): 단위 테스트 + 기능 테스트 서버를 valgrind 아래에서. 판정은 메모리 오류·누수만.
+valgrind:
+	@$(MAKE) --no-print-directory MODE=debug bin unit
+	@$(MAKE) --no-print-directory MODE=release bin
+	@bash tests/valgrind/run.sh
 
 # 누수 검사: 서버 실행 → 요청 → SIGINT → 누수 보고 (Linux: LSan, macOS: leaks + ASan)
 leakcheck:

@@ -375,7 +375,7 @@ static void test_handle_statuses(void)
 static void test_handle_env(void)
 {
     buf_t resp;
-    char want[600];
+    char want[PATH_MAX + 16]; /* cctx.dir 는 PATH_MAX 까지 (gcc -Wformat-truncation) */
 
     buf_init(&resp, 0, 1 << 20);
     handle("POST /cgi-bin/env.sh?x=1&y=2 HTTP/1.1\r\nHost: a\r\nContent-Type: text/plain\r\n"

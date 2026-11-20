@@ -7,6 +7,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -33,6 +35,12 @@ int upstream_is_hop_by_hop(const char *name, size_t n)
     return ieq(name, n, "connection") || ieq(name, n, "keep-alive") || ieq(name, n, "te") ||
            ieq(name, n, "trailer") || ieq(name, n, "transfer-encoding") ||
            ieq(name, n, "upgrade") || (n >= 6 && strncasecmp(name, "proxy-", 6) == 0);
+}
+
+int upstream_is_local_error(int err)
+{
+    return err == EADDRNOTAVAIL || err == EMFILE || err == ENFILE || err == ENOBUFS ||
+           err == EAGAIN;
 }
 
 /* 쉼표로 구분된 토큰 목록 list 에 name 이 있는가 (대소문자 무시) */
@@ -288,7 +296,7 @@ int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms)
 
     fd = socket(sa->sa_family, SOCK_STREAM, 0);
     if (fd < 0)
-        return UPSTREAM_ECONN;
+        return upstream_is_local_error(errno) ? UPSTREAM_ELOCAL : UPSTREAM_ECONN;
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || platform_sock_init(fd) != 0)
         goto fail;
     fl = fcntl(fd, F_GETFL);
@@ -305,8 +313,11 @@ int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms)
         int soerr = 0;
         socklen_t sl = sizeof soerr;
 
-        if (errno != EINPROGRESS && errno != EINTR)
+        if (errno != EINPROGRESS && errno != EINTR) {
+            if (upstream_is_local_error(errno))
+                rc = UPSTREAM_ELOCAL; /* 임시 포트 고갈 등: 백엔드 탓이 아님 */
             goto fail; /* ECONNREFUSED 등 즉시 실패 */
+        }
         pfd.fd = fd;
         pfd.events = POLLOUT;
         for (;;) {
@@ -330,6 +341,11 @@ int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms)
     }
     if (fcntl(fd, F_SETFL, fl) != 0) /* 이후 I/O 는 blocking + 타임아웃 */
         goto fail;
+    {
+        int one = 1; /* 요청은 한 번에 만들어 보내므로 Nagle 지연이 필요 없다 */
+
+        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    }
     return fd;
 
 fail:

@@ -7,6 +7,7 @@
  *   root     ./www
  *   cgi      /cgi-bin ./build/release/cgi-bin
  *   workers 8 | queue 64 | idle_timeout_ms 5000 | max_requests 100 | cgi_timeout_ms 5000
+ *   header_timeout_ms 10000               # 요청 첫 바이트 → 헤더 끝 총 시간 (slowloris, 0 = 끔)
  *   upstream_connect_timeout_ms 1000
  *   upstream_read_timeout_ms    5000
  *   upstream_down_secs          10
@@ -51,6 +52,7 @@ typedef struct {
     long workers;
     long queue;
     long idle_timeout_ms;
+    long header_timeout_ms;
     long max_requests;
     long cgi_timeout_ms;
     long upstream_connect_timeout_ms;
