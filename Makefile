@@ -3,6 +3,7 @@
 #   make debug       : 디버그 바이너리   build/debug/webserver   (-O0 -g3)
 #   make test        : 단위 테스트 빌드 + 실행 (debug 설정)
 #   make asan        : ASan + UBSan 으로 바이너리와 단위 테스트를 빌드하고 테스트 실행
+#   make func        : 기능 테스트 (서버를 띄우고 curl 로 검증, tests/func/*.sh)
 #   make clean       : build/ 삭제
 #
 # 모드마다 build/<mode>/ 에 따로 빌드한다. 같은 .o 를 다른 플래그로 섞어 링크하는 사고를 막기 위해서다.
@@ -39,7 +40,7 @@ LDLIBS := -pthread
 
 # 구현이 끝난 모듈만 나열한다. 빈 모듈은 -pedantic 에서 "빈 번역 단위" 오류가 나므로
 # 각 단계에서 구현할 때 여기에 추가한다.
-MODULES := buf http_parser mime
+MODULES := buf http_parser mime netio log http_response threadpool server conn static
 
 BUILD     := build/$(MODE)
 LIB_OBJS  := $(patsubst %,$(BUILD)/obj/%.o,$(MODULES))
@@ -48,7 +49,7 @@ BIN       := $(BUILD)/webserver
 TEST_SRCS := $(wildcard tests/unit/test_*.c)
 TEST_BINS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRCS))
 
-.PHONY: all debug asan test clean bin unit unit-run
+.PHONY: all debug asan test func clean bin unit unit-run
 
 all: bin
 
@@ -60,6 +61,10 @@ test:
 
 asan:
 	@$(MAKE) --no-print-directory MODE=asan bin unit-run SAN=1
+
+# 기능 테스트: 실제 서버를 띄우고 curl 로 검증 (포트와 curl 이 필요해서 test 와 분리)
+func: bin
+	@set -e; for t in tests/func/*.sh; do case $$t in */lib.sh) continue;; esac; bash $$t $(BIN); done
 
 bin: $(BIN)
 
