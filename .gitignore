@@ -1,0 +1,7 @@
+build/
+build-asan/
+*.dSYM/
+*.o
+.DS_Store
+www/__test/
+www/__bench/

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cwebserv — C로 만든 웹 서버</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="icon" href="/img/logo.png">
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <img src="/img/logo.png" alt="" width="48" height="48">
+      <div>
+        <h1>cwebserv</h1>
+        <p class="sub">POSIX 소켓만으로 만든 HTTP/1.1 서버 · 리버스 프록시 · 포워드 프록시</p>
+      </div>
+    </header>
+
+    <section>
+      <h2>정적 파일</h2>
+      <p>이 페이지, <a href="/css/style.css">CSS</a>, <a href="/js/app.js">JS</a>,
+        <a href="/img/logo.png">PNG</a>, <a href="/img/photo.jpg">JPG</a>, <a href="/docs/">디렉터리 index</a>,
+        <a href="/docs">슬래시 없는 디렉터리(301)</a>, <a href="/nope.html">없는 파일(404)</a>,
+        <a href="/.env">숨김 파일(403)</a></p>
+      <img class="photo" src="/img/photo.jpg" alt="JPG served with image/jpeg">
+    </section>
+
+    <section>
+      <h2>동적 요청 — CGI</h2>
+      <p><a href="/cgi-bin/hello.sh/extra/path?name=world">GET /cgi-bin/hello.sh</a> ·
+        <a href="/cgi-bin/created.sh">Status: 201</a> ·
+        <a href="/cgi-bin/broken.sh">잘못된 출력(502)</a></p>
+      <form method="post" action="/cgi-bin/form.sh">
+        <input name="message" value="안녕 <b>CGI</b>" aria-label="message">
+        <button>POST 보내기</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>리버스 프록시 — /api/* → 백엔드 (Round-Robin)</h2>
+      <p>백엔드를 띄운 뒤 (<code>make demo</code>) 버튼을 누르면 응답한 백엔드가 번갈아 바뀝니다.</p>
+      <button id="call-api">GET /api/hello 4번</button>
+      <ul id="api-out" class="log"></ul>
+    </section>
+
+    <section>
+      <h2>서버 상태 — <a href="/__status">/__status</a></h2>
+      <pre id="status">불러오는 중…</pre>
+    </section>
+  </main>
+  <script src="/js/app.js"></script>
+</body>
+</html>
