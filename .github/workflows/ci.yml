@@ -1,4 +1,4 @@
-# CI: 각 구현 폴더(threadpool/, 이후 multiplex/)를 Linux 와 macOS 에서 빌드·단위 테스트·ASan·기능 테스트·누수 검사, Linux 에서 valgrind.
+# CI: 각 구현 폴더(threadpool/, multiplex/)를 Linux 와 macOS 에서 빌드·단위 테스트·ASan·기능 테스트·누수 검사, Linux 에서 valgrind.
 # 부하 테스트는 넣지 않는다: 공용 러너는 측정값 편차가 커서 의미가 없다 (docs/benchmark.md 는 로컬 측정).
 name: CI
 
@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        impl: [threadpool]
+        impl: [threadpool, multiplex]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
@@ -24,7 +24,7 @@ jobs:
 
       - name: 의존 도구 (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd lsof curl gdb
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd lsof curl gdb python3
 
       - name: 컴파일러 정보
         run: cc --version && make --version | head -1
@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        impl: [threadpool]
+        impl: [threadpool, multiplex]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:

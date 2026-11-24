@@ -4,6 +4,15 @@
 정적 파일, CGI, 리버스 프록시(경로·Host 라우팅 + 라운드로빈), 포워드 프록시(+ LRU 캐시)를 지원하고,
 macOS와 Linux에서 같은 코드로 빌드됩니다.
 
+같은 서버를 **두 가지 동시성 모델**로 구현해 나란히 두었습니다.
+
+| | `threadpool/` | `multiplex/` |
+|---|---|---|
+| 모델 | accept 스레드 + 워커 스레드 풀 + bounded queue | 단일 스레드 이벤트 루프 (Linux epoll / macOS kqueue) |
+| 기능 | 정적, CGI, 리버스 프록시, 포워드 프록시 + 캐시 | 정적 파일 |
+| 동시 연결 상한 | 워커 수 (나머지는 큐에서 대기) | fd 한도 (`-c`, 기본 4096) |
+| 코드 스타일 | 블로킹 I/O, 위에서 아래로 읽히는 흐름 | 논블로킹 + 연결별 상태 머신 + 타이머 힙 |
+
 설계의 "왜"는 [`docs/DESIGN.md`](docs/DESIGN.md), 부하 테스트 전체 결과는 [`docs/benchmark.md`](docs/benchmark.md)에 있습니다.
 
 ## 기능
@@ -23,7 +32,7 @@ macOS와 Linux에서 같은 코드로 빌드됩니다.
 
 ```
 threadpool/   스레드 풀 구현 (위 기능 전부)          — Makefile, src/, tests/, cgi-bin/
-multiplex/    I/O 멀티플렉싱 구현 (정적 파일)        — 다음 단계에서 추가
+multiplex/    I/O 멀티플렉싱 구현 (정적 파일)        — Makefile, src/, tests/
 tests/load/   두 구현의 부하 비교 (wrk)
 docs/ examples/                                     — 공용
 ```
@@ -33,7 +42,8 @@ docs/ examples/                                     — 공용
 
 ## 빌드와 실행
 
-아래 명령은 `threadpool/` 안에서 실행하는 기준입니다 (`cd threadpool`).
+루트에서 `make`, `make test`, `make func` 등을 실행하면 두 구현 모두에서 돕니다.
+아래 명령은 `threadpool/` 안에서 실행하는 기준입니다 (`cd threadpool`). `multiplex/`는 [아래 절](#io-멀티플렉싱-판-multiplex)을 보세요.
 
 ```sh
 make                 # build/release/webserver + 예제 CGI(build/release/cgi-bin/)
@@ -44,7 +54,7 @@ make func            # 기능 테스트: 실제 서버를 띄우고 curl/nc 로 
 make func-asan       # 기능 테스트 전체를 ASan 서버로
 make leakcheck       # 서버 실행 → 요청 → SIGINT → 누수 0 (Linux: LSan, macOS: leaks)
 make valgrind        # (Linux) 단위 + 기능 테스트를 valgrind 로
-make -C .. load      # (루트에서 make load) wrk 부하 테스트 → docs/benchmark.md
+bash ../tests/load/run.sh   # (루트 기준 tests/load/run.sh) 워커 수 × 연결 수 부하 테스트 → docs/benchmark.md
 ```
 
 ```sh
@@ -93,7 +103,7 @@ for i in 1 2 3 4; do curl -s -D - -o /dev/null localhost:8080/api/ | grep X-Back
 curl -x localhost:8080 http://localhost:9001/ -D - -o /dev/null | grep X-Cache              # MISS → HIT
 ```
 
-## 아키텍처
+## 아키텍처 (스레드 풀 판)
 
 ```
                  ┌──────────── main 스레드 ────────────┐
@@ -120,16 +130,16 @@ upstream, rproxy, fproxy, cache, config, log, platform.h` — OS 차이는 `plat
 
 | 종류 | 내용 |
 |---|---|
-| 단위 (17개 파일) | 파서 분할 무관성(1바이트씩, 무작위 분할, 변형 입력 2000개), 오류 테이블, 경로 탈출, LRU 순서와 동시 접근, RR 원자성, 요청 재작성 등 |
-| 기능 (`threadpool/tests/func`) | static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
+| 단위 (스레드 풀 17개 + 이벤트 루프 10개 파일) | 파서 분할 무관성(1바이트씩, 무작위 분할, 변형 입력 2000개), 오류 테이블, 경로 탈출, LRU 순서와 동시 접근, RR 원자성, 요청 재작성 등 |
+| 기능 | 스레드 풀: static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31 / 이벤트 루프: static 34, abort 8, edge 32, multiplex 15 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
 | 메모리 | ASan + UBSan(단위·기능 전체), leaks/LSan, valgrind(CI) |
 | 테스트를 테스트 | 주요 방어 코드를 일부러 깨면(변이) 해당 테스트가 실패하는 것을 확인 (DESIGN.md 각 절) |
-| CI | GitHub Actions: ubuntu-latest, macos-latest (+ valgrind) |
+| CI | GitHub Actions: 두 구현 × (ubuntu-latest, macos-latest) + valgrind |
 
-## 부하 테스트
+## 부하 테스트 (스레드 풀 판: 워커 수 × 연결 수)
 
 Apple M2 / macOS 26.3, 루프백, wrk 4.2.0, 1KB 정적 파일, keep-alive, 조합당 8초 1회 측정.
-전체 표와 측정 조건은 [`docs/benchmark.md`](docs/benchmark.md)에 있습니다(루트에서 `make load`로 재생성).
+전체 표와 측정 조건은 [`docs/benchmark.md`](docs/benchmark.md)에 있습니다(루트에서 `bash tests/load/run.sh`로 재생성).
 
 | 대상 | 워커 | 연결 10 (req/s, p99) | 연결 100 (req/s, p99) | 연결 500 (req/s, 2초 초과) |
 |---|---:|---|---|---|
@@ -151,20 +161,61 @@ Apple M2 / macOS 26.3, 루프백, wrk 4.2.0, 1KB 정적 파일, keep-alive, 조�
   맞지 않는 값인데, 원인을 확인하지 못했습니다. 연결 하나로 잴 때 중앙값은 0.15ms인데 p99가 20~50ms로 튀는
   현상도 원인을 찾지 못했습니다(서버 쪽 Nagle, 접근 로그, keep-alive는 원인이 아님을 확인).
 
-## 한계 (C10K)
+## I/O 멀티플렉싱 판 (`multiplex/`)
 
-- **동시에 처리할 수 있는 연결 수 = 워커 수.** 연결 하나를 워커 하나가 keep-alive 동안 붙잡습니다.
-  위 표에서 `-c 500`일 때 워커 수를 넘는 연결은 큐에서 기다리다 타임아웃됩니다. 연결 수만 개(C10K)는
-  이 구조로 감당할 수 없습니다.
-- **slowloris 방어는 부분적입니다.** 헤더 마감은 한 연결이 워커를 붙잡는 시간을 최대 10초로 제한할 뿐,
-  워커 수만큼 연결을 동시에 열어 두는 공격은 막지 못합니다(`edge.sh`의 slowloris x4).
+스레드 풀 판의 가장 큰 한계("동시에 처리하는 연결 수 = 워커 수")를 없애려고 만든 두 번째 구현입니다.
+스레드 하나가 epoll(Linux)/kqueue(macOS)로 모든 소켓을 지켜보다가 준비된 소켓만 처리합니다.
+
+```sh
+cd multiplex
+make && make test && make func      # 단위 10개 파일, 기능 static/abort/edge/multiplex
+./build/release/webserver -p 8080 -r ../examples/www -c 10000
+```
+
+옵션: `-p` 포트, `-r` 문서 루트, `-c` 최대 동시 연결(기본 4096, 넘으면 503), `-t` 유휴 타임아웃(ms),
+`-T` 헤더 마감(ms), `-m` 연결당 최대 요청 수, `-n/--name` 응답에 `X-Backend` 헤더.
+
+```
+            ┌─────────────────────── 스레드 1개 ───────────────────────┐
+ 클라이언트 ─▶ epoll_wait / kevent (다음 타이머 마감까지)                  │
+            │   ├ 리슨 소켓 → accept (논블로킹, 최대 연결 넘으면 503)      │
+            │   ├ 연결 소켓 → 상태 머신: READ → (파싱 완료) → WRITE → READ │
+            │   │             EAGAIN 이면 상태를 conn_t 에 남기고 다음 이벤트 │
+            │   └ 타이머 힙 → 유휴 닫기 / 헤더 마감 408 / 전송 정체 닫기    │
+            └──────────────────────────────────────────────────────────┘
+```
+
+**두 구현 비교** (루트에서 `make load`, 1KB 정적 파일, 8초 1회 측정, 전체는 [`docs/benchmark.md`](docs/benchmark.md)):
+
+| 상황 | 스레드 풀 (워커 8) | 스레드 풀 (워커 64) | 이벤트 루프 (1 스레드) |
+|---|---|---|---|
+| 연결 10 | 9,810 req/s, p99 167ms | 26,747 req/s, p99 2.3ms | 12,578 req/s, p99 69ms |
+| 연결 100 | 10,535 req/s, p99 1.65s | 19,216 req/s, p99 213ms | 14,197 req/s, p99 15ms |
+| 연결 2000 | 8,143 req/s, 503 21,397건 | 9,318 req/s, 503 3,518건 | 9,909 req/s, 503 0건 |
+| **유휴 연결 1000개 + 연결 10** | **응답 0건** | **응답 0건** | **9,439 req/s, p99 12ms** |
+
+- 마지막 줄이 핵심입니다. 요청을 보내지 않고 연결만 열어 둔 클라이언트 1000개가 있으면, 스레드 풀은
+  워커가 전부 유휴 연결에 붙잡혀 새 요청에 하나도 응답하지 못합니다(워커 64개여도 마찬가지).
+  이벤트 루프는 유휴 연결이 fd 하나와 약 3.5KB만 차지하므로 평소처럼 응답합니다.
+- 연결이 적고 모두 바쁠 때 처리량은 워커 64개 스레드 풀이 더 높습니다. 이벤트 루프는 CPU 코어 하나만
+  쓰기 때문입니다.
+- 이 노트북에서 같은 조건을 다시 재면 ±50%까지 흔들렸습니다. 숫자보다 경향만 읽어야 합니다.
+
+## 한계
+
+- **스레드 풀 판: 동시에 처리하는 연결 수 = 워커 수.** 위 표의 "유휴 연결 1000개"가 이 한계를 보여 줍니다.
+  헤더 마감(slowloris 방어)은 연결 하나가 워커를 붙잡는 시간을 10초로 제한할 뿐, 워커 수만큼 연결을
+  동시에 여는 공격은 막지 못합니다(`threadpool/tests/func/edge.sh`의 slowloris x4).
+- **이벤트 루프 판: 스레드 하나라서 CPU 코어 하나만 씁니다.** 파일 `read()`도 블로킹이라, 페이지 캐시에
+  없는 파일을 읽는 동안에는 모든 연결이 멈춥니다. 기능은 정적 파일뿐입니다.
 - 업스트림 커넥션 풀이 없습니다(요청마다 연결). 리버스 프록시 처리량이 정적 파일보다 낮은 이유 중 하나이고,
   TIME_WAIT 소켓이 쌓여 임시 포트가 고갈될 수 있습니다. 그때는 백엔드를 down으로 표시하지 않고 503을 보냅니다.
 - chunked 요청 본문(411), https와 CONNECT(501), HTTP/2는 지원하지 않습니다.
 
-## 다음 단계: epoll/kqueue 하이브리드
+## 다음 단계
 
-I/O 대기는 이벤트 루프(Linux epoll / macOS kqueue — `platform.h`로 감쌈)가 맡고, **완성된 요청만**
-워커 풀에 넘기는 구조입니다. 유휴 연결과 느린 연결은 워커를 차지하지 않고 fd와 버퍼만 차지하게 됩니다.
-파서가 이미 I/O 없는 증분 파서라서, 이벤트 루프는 받은 바이트를 쌓다가 `http_parse()`가 OK를 줄 때만
-넘기면 됩니다. 이어서 업스트림 커넥션 풀, 연결당 메모리 상한을 둘 계획입니다.
+- **하이브리드**: 이벤트 루프가 I/O 대기를 맡고, 파일 read·CGI처럼 블로킹되는 일만 작은 워커 풀에 넘깁니다.
+  일이 끝나면 파이프나 eventfd로 루프를 깨웁니다. 여러 코어를 쓰려면 루프를 코어 수만큼 띄우는 방법
+  (`SO_REUSEPORT`, nginx 워커 프로세스 방식)도 있습니다.
+- 이벤트 루프 판에 리버스 프록시를 붙입니다. 업스트림 소켓을 같은 poller에 등록하면 됩니다.
+- 업스트림 커넥션 풀을 둡니다.
