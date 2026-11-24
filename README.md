@@ -19,7 +19,21 @@ macOS와 Linux에서 같은 코드로 빌드됩니다.
 | 동시성 | main 스레드 accept → bounded queue → 고정 워커 풀, 큐가 차면 503 |
 | 견고성 | graceful shutdown, slowloris 헤더 마감(408), SIGPIPE 방어, CLOEXEC, 접근 로그 |
 
+## 저장소 구성
+
+```
+threadpool/   스레드 풀 구현 (위 기능 전부)          — Makefile, src/, tests/, cgi-bin/
+multiplex/    I/O 멀티플렉싱 구현 (정적 파일)        — 다음 단계에서 추가
+tests/load/   두 구현의 부하 비교 (wrk)
+docs/ examples/                                     — 공용
+```
+
+두 폴더는 서로 의존하지 않는 완전한 복사본입니다. 루트의 `make <타깃>`은 각 폴더에 위임하고,
+한쪽만 빌드하려면 `make -C threadpool <타깃>`처럼 씁니다.
+
 ## 빌드와 실행
+
+아래 명령은 `threadpool/` 안에서 실행하는 기준입니다 (`cd threadpool`).
 
 ```sh
 make                 # build/release/webserver + 예제 CGI(build/release/cgi-bin/)
@@ -30,16 +44,16 @@ make func            # 기능 테스트: 실제 서버를 띄우고 curl/nc 로 
 make func-asan       # 기능 테스트 전체를 ASan 서버로
 make leakcheck       # 서버 실행 → 요청 → SIGINT → 누수 0 (Linux: LSan, macOS: leaks)
 make valgrind        # (Linux) 단위 + 기능 테스트를 valgrind 로
-bash tests/load/run.sh   # wrk 부하 테스트 → docs/benchmark.md
+make -C .. load      # (루트에서 make load) wrk 부하 테스트 → docs/benchmark.md
 ```
 
 ```sh
 # 정적 파일 + CGI
-./build/release/webserver -p 8080 -r ./examples/www -g ./build/release/cgi-bin
+./build/release/webserver -p 8080 -r ../examples/www -g ./build/release/cgi-bin
 curl 'http://localhost:8080/cgi-bin/adder?a=3&b=4'        # 7
 
 # 설정 파일로 (명령줄 옵션이 설정 파일보다 우선)
-./build/release/webserver -f examples/cweb.conf
+./build/release/webserver -f ../examples/cweb.conf
 ```
 
 주요 옵션: `-p` 포트, `-r` 문서 루트, `-w` 워커 수, `-q` 큐 길이, `-t` 유휴 타임아웃(ms),
@@ -72,9 +86,9 @@ cache_default_ttl_secs 60
 
 같은 바이너리로 로드밸런싱을 확인하는 법:
 ```sh
-./build/release/webserver -p 9001 -r ./examples/www --name A &
-./build/release/webserver -p 9002 -r ./examples/www --name B &
-./build/release/webserver -p 8080 -f examples/cweb.conf &
+./build/release/webserver -p 9001 -r ../examples/www --name A &
+./build/release/webserver -p 9002 -r ../examples/www --name B &
+./build/release/webserver -p 8080 -f ../examples/cweb.conf &
 for i in 1 2 3 4; do curl -s -D - -o /dev/null localhost:8080/api/ | grep X-Backend; done   # A B A B
 curl -x localhost:8080 http://localhost:9001/ -D - -o /dev/null | grep X-Cache              # MISS → HIT
 ```
@@ -107,7 +121,7 @@ upstream, rproxy, fproxy, cache, config, log, platform.h` — OS 차이는 `plat
 | 종류 | 내용 |
 |---|---|
 | 단위 (17개 파일) | 파서 분할 무관성(1바이트씩, 무작위 분할, 변형 입력 2000개), 오류 테이블, 경로 탈출, LRU 순서와 동시 접근, RR 원자성, 요청 재작성 등 |
-| 기능 (`tests/func`) | static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
+| 기능 (`threadpool/tests/func`) | static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
 | 메모리 | ASan + UBSan(단위·기능 전체), leaks/LSan, valgrind(CI) |
 | 테스트를 테스트 | 주요 방어 코드를 일부러 깨면(변이) 해당 테스트가 실패하는 것을 확인 (DESIGN.md 각 절) |
 | CI | GitHub Actions: ubuntu-latest, macos-latest (+ valgrind) |
@@ -115,7 +129,7 @@ upstream, rproxy, fproxy, cache, config, log, platform.h` — OS 차이는 `plat
 ## 부하 테스트
 
 Apple M2 / macOS 26.3, 루프백, wrk 4.2.0, 1KB 정적 파일, keep-alive, 조합당 8초 1회 측정.
-전체 표와 측정 조건은 [`docs/benchmark.md`](docs/benchmark.md)에 있습니다(`bash tests/load/run.sh`로 재생성).
+전체 표와 측정 조건은 [`docs/benchmark.md`](docs/benchmark.md)에 있습니다(루트에서 `make load`로 재생성).
 
 | 대상 | 워커 | 연결 10 (req/s, p99) | 연결 100 (req/s, p99) | 연결 500 (req/s, 2초 초과) |
 |---|---:|---|---|---|

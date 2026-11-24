@@ -2,17 +2,18 @@
 # tests/load/run.sh — wrk 로 동시 연결 × 워커 수 조합을 측정해 docs/benchmark.md 표를 만든다.
 #   대상: (1) 정적 파일  (2) 리버스 프록시 → 백엔드 2개(라운드로빈)
 #   조합: -c 10/100/500 × 워커 4/8/16
-# 사용: bash tests/load/run.sh [초(기본 8)] [바이너리(기본 build/release/webserver)]
+# 사용: bash tests/load/run.sh [초(기본 8)] [바이너리(기본 threadpool/build/release/webserver)]
+# 저장소 루트에서 실행한다 (make load)
 # 필요: wrk (macOS: brew install wrk / Ubuntu: apt install wrk)
 set -u
 DUR=${1:-8}
-BIN=${2:-build/release/webserver}
+BIN=${2:-threadpool/build/release/webserver}
 OUT=docs/benchmark.md
 CONNS="10 100 500"
 WORKERS="4 8 16"
 command -v wrk >/dev/null || { echo "wrk 가 필요하다 (brew install wrk)"; exit 1; }
 ulimit -n 8192 2>/dev/null
-source "$(dirname "$0")/../func/lib.sh"
+source "$(dirname "$0")/../../threadpool/tests/func/lib.sh"
 
 mkdir -p "$TMP/www"
 head -c 1024 /dev/zero | tr '\0' 'x' >"$TMP/www/index.html" # 1KB 정적 파일
