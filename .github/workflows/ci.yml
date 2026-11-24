@@ -1,4 +1,4 @@
-# CI: Linux 와 macOS 에서 빌드·단위 테스트·ASan·기능 테스트·누수 검사, Linux 에서 valgrind.
+# CI: 각 구현 폴더(threadpool/, 이후 multiplex/)를 Linux 와 macOS 에서 빌드·단위 테스트·ASan·기능 테스트·누수 검사, Linux 에서 valgrind.
 # 부하 테스트는 넣지 않는다: 공용 러너는 측정값 편차가 커서 의미가 없다 (docs/benchmark.md 는 로컬 측정).
 name: CI
 
@@ -8,13 +8,17 @@ on:
 
 jobs:
   build-test:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.impl }} / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        impl: [threadpool]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ matrix.impl }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,9 +48,16 @@ jobs:
         run: make leakcheck
 
   valgrind:
-    name: valgrind (ubuntu)
+    name: ${{ matrix.impl }} / valgrind (ubuntu)
+    strategy:
+      fail-fast: false
+      matrix:
+        impl: [threadpool]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: ${{ matrix.impl }}
     steps:
       - uses: actions/checkout@v4
       - name: 의존 도구
