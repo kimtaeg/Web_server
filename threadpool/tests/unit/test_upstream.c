@@ -251,7 +251,7 @@ static void relay(const char *req_raw, const char *backend, int close_backend, i
     send_all(up[0], backend, strlen(backend));
     if (close_backend)
         shutdown(up[0], SHUT_WR); /* 백엔드 EOF */
-    o->rc = upstream_relay(up[1], cl[0], &req, 1, timeout_ms, NULL, NULL, &o->res);
+    o->rc = upstream_relay(up[1], &(conn_t){cl[0], NULL, 0}, &req, 1, timeout_ms, NULL, NULL, &o->res);
     close(cl[0]);
     buf_init(&o->client, 0, 1 << 20);
     while ((n = recv_some(cl[1], tmp, sizeof tmp, 500)) > 0)
@@ -424,7 +424,7 @@ static void test_relay_capture(void)
     memset(&cap, 0, sizeof cap);
     buf_init(&cap.head, 0, 4096);
     buf_init(&cap.body, 0, 4096);
-    CHECK_EQ_INT(upstream_relay(up[1], cl[0], &req, 1, 2000, "X-Cache: MISS\r\n", &cap, &res),
+    CHECK_EQ_INT(upstream_relay(up[1], &(conn_t){cl[0], NULL, 0}, &req, 1, 2000, "X-Cache: MISS\r\n", &cap, &res),
                  UPSTREAM_OK);
     close(cl[0]);
     buf_init(&client, 0, 1 << 16);
@@ -450,7 +450,7 @@ static void test_relay_capture(void)
     memset(&cap, 0, sizeof cap);
     buf_init(&cap.head, 0, 4096);
     buf_init(&cap.body, 0, 3);
-    CHECK_EQ_INT(upstream_relay(up[1], cl[0], &req, 1, 2000, NULL, &cap, &res), UPSTREAM_OK);
+    CHECK_EQ_INT(upstream_relay(up[1], &(conn_t){cl[0], NULL, 0}, &req, 1, 2000, NULL, &cap, &res), UPSTREAM_OK);
     CHECK(cap.overflow && !cap.complete);
     buf_free(&cap.head);
     buf_free(&cap.body);

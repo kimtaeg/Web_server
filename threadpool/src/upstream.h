@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 
 #include "buf.h"
+#include "connio.h"
 #include "http_parser.h"
 
 #define UPSTREAM_OK 0
@@ -112,11 +113,11 @@ int upstream_parse_response_head(const char *p, size_t n, upstream_resp_t *r);
 int upstream_connect(const struct sockaddr *sa, socklen_t len, int timeout_ms);
 
 /*
- * 요청은 이미 보냈다고 가정하고 ufd 의 응답을 cfd 로 중계한다. 반환 UPSTREAM_*.
+ * 요청은 이미 보냈다고 가정하고 ufd 의 응답을 클라이언트 cl 로 중계한다 (업스트림 쪽은 항상 평문). 반환 UPSTREAM_*.
  * extra_headers: 클라이언트 응답 헤더에 덧붙일 줄들 ("X-Cache: MISS\r\n"), NULL 가능.
  * cap: NULL 이 아니면 응답 사본을 쌓는다 (호출자가 head/body 를 buf_init 해 둘 것).
  */
-int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_alive,
+int upstream_relay(int ufd, conn_t *cl, const http_request_t *req, int client_keep_alive,
                    int read_timeout_ms, const char *extra_headers, upstream_capture_t *cap,
                    upstream_result_t *res);
 

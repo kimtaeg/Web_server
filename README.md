@@ -2,14 +2,14 @@
 
 외부 HTTP·이벤트 라이브러리 없이 **C11 + POSIX(libc, pthread)만으로** 만든 웹 서버입니다.
 정적 파일, CGI, 리버스 프록시(경로·Host 라우팅 + 라운드로빈), 포워드 프록시(+ LRU 캐시)를 지원하고,
-macOS와 Linux에서 같은 코드로 빌드됩니다.
+macOS와 Linux에서 같은 코드로 빌드됩니다. HTTPS는 암호화와 TLS 프로토콜만 OpenSSL에 맡깁니다([HTTPS](#https-스레드-풀-판)).
 
 같은 서버를 **두 가지 동시성 모델**로 구현해 나란히 두었습니다.
 
 | | `threadpool/` | `multiplex/` |
 |---|---|---|
 | 모델 | accept 스레드 + 워커 스레드 풀 + bounded queue | 단일 스레드 이벤트 루프 (Linux epoll / macOS kqueue) |
-| 기능 | 정적, CGI, 리버스 프록시, 포워드 프록시 + 캐시 | 정적 파일 |
+| 기능 | 정적, CGI, 리버스 프록시, 포워드 프록시 + 캐시, HTTPS(OpenSSL) | 정적 파일 |
 | 동시 연결 상한 | 워커 수 (나머지는 큐에서 대기) | fd 한도 (`-c`, 기본 4096) |
 | 코드 스타일 | 블로킹 I/O, 위에서 아래로 읽히는 흐름 | 논블로킹 + 연결별 상태 머신 + 타이머 힙 |
 
@@ -26,6 +26,7 @@ macOS와 Linux에서 같은 코드로 빌드됩니다.
 | 리버스 프록시 | 최장 접두사·Host 규칙, 원자적 라운드로빈, 연결 실패 시 down 표시 + 1회 재시도, 응답 스트리밍 |
 | 포워드 프록시 | absolute-form(`curl -x`), getaddrinfo, LRU 캐시(해시맵 + 이중 연결 리스트 + rwlock), `X-Cache` |
 | 동시성 | main 스레드 accept → bounded queue → 고정 워커 풀, 큐가 차면 503 |
+| HTTPS | OpenSSL, HTTP(8080)와 HTTPS(8443) 동시 수신, TLS 1.2 이상, 같은 파서·핸들러 재사용, CGI·프록시도 HTTPS로 |
 | 견고성 | graceful shutdown, slowloris 헤더 마감(408), SIGPIPE 방어, CLOEXEC, 접근 로그 |
 
 ## 저장소 구성
@@ -48,7 +49,8 @@ docs/ examples/                                     — 공용
 ```sh
 make                 # build/release/webserver + 예제 CGI(build/release/cgi-bin/)
 make debug           # -O0 -g3
-make test            # 단위 테스트 (17개 파일)
+make test            # 단위 테스트 (19개 파일)
+make cert            # HTTPS용 자체 서명 인증서 → certs/server.crt, certs/server.key
 make asan            # ASan + UBSan 으로 단위 테스트
 make func            # 기능 테스트: 실제 서버를 띄우고 curl/nc 로 검증 (tests/func/*.sh)
 make func-asan       # 기능 테스트 전체를 ASan 서버로
@@ -67,7 +69,8 @@ curl 'http://localhost:8080/cgi-bin/adder?a=3&b=4'        # 7
 ```
 
 주요 옵션: `-p` 포트, `-r` 문서 루트, `-w` 워커 수, `-q` 큐 길이, `-t` 유휴 타임아웃(ms),
-`-T` 헤더 마감(ms), `-g` CGI 디렉터리, `-c` CGI 타임아웃(ms), `-n/--name` 백엔드 이름(`X-Backend` 헤더), `-f` 설정 파일.
+`-T` 헤더 마감(ms), `-g` CGI 디렉터리, `-c` CGI 타임아웃(ms), `-n/--name` 백엔드 이름(`X-Backend` 헤더), `-f` 설정 파일,
+`-C` 인증서 / `-K` 개인키 / `-s` HTTPS 포트(기본 8443).
 
 ## 설정 예시
 
@@ -123,15 +126,15 @@ curl -x localhost:8080 http://localhost:9001/ -D - -o /dev/null | grep X-Cache  
  종료: SIGINT → 플래그 → 리슨 소켓 close → 큐 close(워커 깨움) → 진행 중 요청 완료 → join → free
 ```
 
-모듈: `main, server, threadpool, conn, buf, netio, http_parser, http_response, mime, static, cgi, router,
+모듈: `main, server, threadpool, conn, connio, tls, buf, netio, http_parser, http_response, mime, static, cgi, router,
 upstream, rproxy, fproxy, cache, config, log, platform.h` — OS 차이는 `platform.h`에만 있습니다.
 
 ## 테스트
 
 | 종류 | 내용 |
 |---|---|
-| 단위 (스레드 풀 17개 + 이벤트 루프 10개 파일) | 파서 분할 무관성(1바이트씩, 무작위 분할, 변형 입력 2000개), 오류 테이블, 경로 탈출, LRU 순서와 동시 접근, RR 원자성, 요청 재작성 등 |
-| 기능 | 스레드 풀: static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31 / 이벤트 루프: static 34, abort 8, edge 32, multiplex 15 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
+| 단위 (스레드 풀 19개 + 이벤트 루프 10개 파일) | 파서 분할 무관성(1바이트씩, 무작위 분할, 변형 입력 2000개), 오류 테이블, 경로 탈출, LRU 순서와 동시 접근, RR 원자성, 요청 재작성 등 |
+| 기능 | 스레드 풀: static 34, cgi 42, rproxy 26, fproxy 36, abort 8, edge 31, tls 39 / 이벤트 루프: static 34, abort 8, edge 32, multiplex 15 — 실제 서버 + curl/nc (각 스크립트 마지막에 서버 로그의 sanitizer 오류 검사 포함) |
 | 메모리 | ASan + UBSan(단위·기능 전체), leaks/LSan, valgrind(CI) |
 | 테스트를 테스트 | 주요 방어 코드를 일부러 깨면(변이) 해당 테스트가 실패하는 것을 확인 (DESIGN.md 각 절) |
 | CI | GitHub Actions: 두 구현 × (ubuntu-latest, macos-latest) + valgrind |
@@ -201,6 +204,84 @@ make && make test && make func      # 단위 10개 파일, 기능 static/abort/e
   쓰기 때문입니다.
 - 이 노트북에서 같은 조건을 다시 재면 ±50%까지 흔들렸습니다. 숫자보다 경향만 읽어야 합니다.
 
+## HTTPS (스레드 풀 판)
+
+기존 서버에 **TLS 계층만 추가**했습니다. 파서, 라우터, 정적 파일·CGI·프록시 핸들러는 그대로이고,
+클라이언트 소켓을 읽고 쓰는 곳만 `conn_read`/`conn_write`로 바뀌었습니다. 평문 연결이면 이 함수들이
+기존 `send_all`/`recv_some`을 그대로 부릅니다.
+
+### 1. 인증서와 개인키 만들기 (자체 서명)
+
+```sh
+cd threadpool
+make cert          # = bash tools/gen-cert.sh certs
+# 내부 명령:
+# openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 \
+#   -keyout certs/server.key -out certs/server.crt -subj "/CN=localhost" \
+#   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1"
+```
+
+- SAN에 `localhost`와 `127.0.0.1`이 들어갑니다. 요즘 클라이언트는 CN이 아니라 SAN으로 이름을 검증합니다.
+- `certs/`는 `.gitignore`에 있습니다. 개인키는 커밋하지 않습니다.
+
+### 2. OpenSSL 빌드 설정
+
+- **필요한 버전과 설치**: OpenSSL **1.1.0 이상**이 필요합니다. macOS는 `brew install openssl@3`,
+  Ubuntu는 `apt install libssl-dev`로 설치합니다.
+- **경로 찾기**: `Makefile`이 경로를 찾습니다. `pkg-config openssl`을 먼저 보고, 없으면 Homebrew
+  `openssl@3`(또는 `openssl@1.1`)를 봅니다. 직접 지정하려면 `make OPENSSL_PREFIX=/경로`라고 씁니다.
+- **추가되는 플래그**:
+  - `-isystem <prefix>/include`: OpenSSL 헤더 안의 경고는 `-Werror -pedantic`에서 제외됩니다. 우리 코드에는 그대로 적용됩니다.
+  - `-DOPENSSL_API_COMPAT=0x10100000L`: 1.1.0 API를 기준으로 컴파일합니다.
+  - `-lssl -lcrypto`: 링크합니다.
+
+### 3. 실행과 테스트
+
+```sh
+./build/release/webserver -r ../examples/www -C certs/server.crt -K certs/server.key   # HTTP 8080 + HTTPS 8443
+
+curl http://localhost:8080/                       # 기존 HTTP 그대로
+curl -k https://localhost:8443/                   # -k: 자체 서명이라 검증 생략
+curl https://localhost:8443/                      # 검증 실패 → curl: (60) SSL certificate problem
+curl --cacert certs/server.crt https://localhost:8443/   # 이 인증서를 신뢰 → 검증 성공
+openssl s_client -connect localhost:8443          # 핸드셰이크 과정·인증서·협상된 버전/암호 확인
+curl http://localhost:8443/                       # HTTPS 포트에 평문 → 400 (서버는 계속 동작)
+```
+
+- **설정 파일로**: `tls_cert`, `tls_key`, `https_port`로도 지정할 수 있습니다.
+- **HTTPS가 꺼지는 경우**: 인증서와 키를 주지 않으면 HTTPS는 꺼지고, 기존과 완전히 같게 동작합니다.
+- **시작을 거부하는 경우**: 인증서와 키가 짝이 아니거나, 파일이 없거나, 둘 중 하나만 주면 시작하지 않고 종료 코드 1로 끝납니다.
+- **자동 테스트**: `tests/func/tls.sh`(39개 검사)와 `tests/unit/test_tls.c`, `test_connio.c`가 위 내용을 확인합니다.
+  `make leakcheck`와 `make valgrind`도 HTTPS 경로를 지나갑니다.
+
+### 4. HTTP와 HTTPS의 처리 과정 비교
+
+```
+                HTTP (8080)                          HTTPS (8443)
+accept        main: accept → 큐 {fd, tls=0}         main: accept → 큐 {fd, tls=1}
+연결 시작      (없음)                                워커: SSL_new → SSL_set_fd → SSL_accept
+                                                     (핸드셰이크: 버전·암호 협상, 인증서 전송, 키 교환)
+요청 읽기      recv_some(fd)  = poll + recv          conn_read = (SSL_pending 이 0 이면 poll) + SSL_read(복호화)
+파싱·라우팅    http_parse → router → 핸들러          ← 완전히 같음
+응답 쓰기      send_all(fd)                          conn_write = SSL_write(암호화, 레코드 ≤16KB, 반복)
+CGI            파이프로 출력 수집 → send_all          파이프로 출력 수집 → SSL_write  (소켓에 dup2 하지 않음)
+프록시         백엔드 응답 → send_all                 백엔드 응답(평문) → SSL_write
+닫기           shutdown(WR) → 남은 입력 비움 → close  SSL_shutdown(close_notify) → SSL_free → shutdown → close
+```
+
+### 5. 추가된 TLS 함수들
+
+| 함수 (파일) | 하는 일 | 쓰는 OpenSSL 함수 |
+|---|---|---|
+| `tls_ctx_create` (`tls.c`) | 시작 시 한 번 SSL_CTX를 만듭니다. TLS 1.2 이상만 협상하고, 인증서·키를 등록하고 짝을 검증하고, AUTO_RETRY를 켭니다 | `OPENSSL_init_ssl`, `SSL_CTX_new(TLS_server_method())`, `SSL_CTX_set_min_proto_version`, `SSL_CTX_use_certificate_chain_file`, `SSL_CTX_use_PrivateKey_file`, `SSL_CTX_check_private_key`, `SSL_CTX_set_mode` |
+| `tls_accept` (`tls.c`) | 연결마다 SSL 객체를 만들고 핸드셰이크를 합니다. 핸드셰이크 동안만 non-blocking으로 두고 `WANT_READ`/`WANT_WRITE`를 poll로 기다려 전체 마감을 지킵니다. 평문 HTTP는 따로 구분하고, 실패하면 SSL을 해제합니다 | `SSL_new`, `SSL_set_fd`, `SSL_accept`, `SSL_get_error`, `SSL_free` |
+| `conn_read` (`connio.c`) | 요청 바이트를 복호화해 읽습니다. `SSL_pending`을 먼저 보고, 0일 때만 poll로 기다립니다 | `SSL_pending`, `SSL_read` |
+| `conn_write` (`connio.c`) | 응답을 암호화해 전부 보냅니다. 부분 쓰기는 반복합니다 | `SSL_write` |
+| `tls_io_fail` (`tls.c`) | 실패한 SSL_read/SSL_write를 EOF / 타임아웃 / 오류로 나누고 로그로 남깁니다. 치명적 오류면 이후 `SSL_shutdown`을 금지합니다 | `SSL_get_error`, `ERR_peek_error` |
+| `tls_log_queue` (`tls.c`) | 스레드의 OpenSSL 오류 큐를 로그 한 줄씩으로 옮깁니다 | `ERR_print_errors_cb` |
+| `tls_close` (`tls.c`) | close_notify를 보내고 SSL 객체를 해제합니다. 소켓은 호출자가 닫습니다 | `SSL_shutdown`, `SSL_free` |
+| `tls_ctx_free` (`tls.c`) | 종료 시 워커가 모두 끝난 뒤 CTX를 해제합니다 | `SSL_CTX_free` |
+
 ## 한계
 
 - **스레드 풀 판: 동시에 처리하는 연결 수 = 워커 수.** 위 표의 "유휴 연결 1000개"가 이 한계를 보여 줍니다.
@@ -210,7 +291,13 @@ make && make test && make func      # 단위 10개 파일, 기능 static/abort/e
   없는 파일을 읽는 동안에는 모든 연결이 멈춥니다. 기능은 정적 파일뿐입니다.
 - 업스트림 커넥션 풀이 없습니다(요청마다 연결). 리버스 프록시 처리량이 정적 파일보다 낮은 이유 중 하나이고,
   TIME_WAIT 소켓이 쌓여 임시 포트가 고갈될 수 있습니다. 그때는 백엔드를 down으로 표시하지 않고 503을 보냅니다.
-- chunked 요청 본문(411), https와 CONNECT(501), HTTP/2는 지원하지 않습니다.
+- chunked 요청 본문(411), CONNECT(HTTPS 터널링, 501), HTTP/2는 지원하지 않습니다.
+- **HTTPS의 한계**
+  - 스레드 풀 판에만 있습니다.
+  - 인증서는 하나만 씁니다(SNI로 도메인별 인증서를 고르지 않음).
+  - 프록시가 백엔드로 가는 연결은 평문입니다(업스트림 TLS는 별도 작업).
+  - 핸드셰이크 뒤에는 blocking `SSL_read`를 씁니다. TLS 레코드 하나를 아주 천천히 보내는 클라이언트는
+    헤더 마감(408)이 아니라 `SO_RCVTIMEO`(유휴 타임아웃, 수신 한 번마다 다시 셈)로만 막힙니다(DESIGN.md 17절).
 
 ## 다음 단계
 

@@ -17,7 +17,19 @@
  */
 int server_listen(const char *host, int port, int backlog);
 
-/* *stop 이 설정될 때까지 accept 해서 tp 에 넣는다. 정상 종료 0, 복구 불가 오류 -1. */
-int server_run(int lfd, threadpool_t *tp, volatile sig_atomic_t *stop);
+#define SERVER_MAX_LISTENERS 4
+
+/* 리슨 소켓 하나. tls = 1 이면 HTTPS 포트: 여기서 받은 연결은 워커가 TLS 핸드셰이크부터 한다. */
+typedef struct {
+    int fd;
+    int tls;
+} server_listener_t;
+
+/*
+ * *stop 이 설정될 때까지 리슨 소켓들(HTTP 8080, HTTPS 8443 ...)을 한 poll 로 함께 기다리며
+ * accept 해서 tp 에 {fd, tls} 로 넣는다. n 은 1~SERVER_MAX_LISTENERS. 정상 종료 0, 복구 불가 오류 -1.
+ */
+int server_run(const server_listener_t *ls, size_t n, threadpool_t *tp,
+               volatile sig_atomic_t *stop);
 
 #endif /* SERVER_H */

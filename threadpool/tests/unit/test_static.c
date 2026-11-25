@@ -242,7 +242,7 @@ static int serve(const char *raw, buf_t *out, handler_result_t *res)
     {
         conn_info_t ci = {"127.0.0.1"};
 
-        rc = static_handle(&sctx, sv[0], &req, &ci, 1, res);
+        rc = static_handle(&sctx, &(conn_t){sv[0], NULL, 0}, &req, &ci, 1, res);
     }
     close(sv[0]);
     buf_reset(out);

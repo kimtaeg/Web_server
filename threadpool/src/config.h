@@ -17,6 +17,9 @@
  *   cache_max_bytes 67108864              # 포워드 프록시 캐시 전체 상한 (0 = 캐시 끔)
  *   cache_max_object_bytes 1048576        # 객체 하나 상한
  *   cache_default_ttl_secs 60             # Cache-Control max-age 가 없을 때의 TTL
+ *   tls_cert certs/server.crt             # 둘 다 있으면 HTTPS 켜짐 (같은 주소, https_port 에서)
+ *   tls_key  certs/server.key
+ *   https_port 8443                       # 기본 8443
  *
  * 오류는 "line 7: unknown directive 'rout'" 처럼 줄 번호와 함께 err 에 쓴다.
  * 동기화: 시작 시 main 스레드에서만 읽고 쓴다. 이후 서버는 여기서 만든 값을 복사해 쓴다.
@@ -62,6 +65,9 @@ typedef struct {
     long cache_max_bytes;
     long cache_max_object_bytes;
     long cache_default_ttl_secs;
+    long https_port;
+    char tls_cert[PATH_MAX]; /* "" = HTTPS 꺼짐 */
+    char tls_key[PATH_MAX];
     config_route_t routes[CONFIG_MAX_ROUTES];
     size_t nroutes;
 } config_t;

@@ -87,27 +87,27 @@ void rproxy_mark_down(rproxy_pool_t *p, size_t i, long long now_ms)
     atomic_store(&p->backends[i].down_until_ms, now_ms + p->down_ms);
 }
 
-static int reply_x(int fd, int status, int ka, int head, const char *extra, handler_result_t *res)
+static int reply_x(conn_t *cl, int status, int ka, int head, const char *extra, handler_result_t *res)
 {
     size_t sent = 0;
-    int rc = http_response_status_page(fd, status, ka, head, extra, &sent);
+    int rc = http_response_status_page(cl, status, ka, head, extra, &sent);
 
     res->status = status;
     res->bytes = sent;
     return rc;
 }
 
-static int reply(int fd, int status, int ka, int head, handler_result_t *res)
+static int reply(conn_t *cl, int status, int ka, int head, handler_result_t *res)
 {
     size_t sent = 0;
-    int rc = http_response_status_page(fd, status, ka, head, NULL, &sent);
+    int rc = http_response_status_page(cl, status, ka, head, NULL, &sent);
 
     res->status = status;
     res->bytes = sent;
     return rc;
 }
 
-int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int rproxy_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res)
 {
     rproxy_pool_t *p = ctx;
@@ -126,14 +126,14 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
 
     if (upstream_request_has_our_via(req)) { /* 내가 보낸 요청이 돌아옴: 라우트가 자기 자신을 가리킴 */
         log_msg(LOG_WARN, "rproxy: 프록시 루프 감지 (Via 에 자기 표식) → 508");
-        rc = reply(fd, 508, 0, is_head, res);
+        rc = reply(cl, 508, 0, is_head, res);
         res->close = 1;
         goto cleanup;
     }
     idx = rproxy_pick(p, rproxy_now_ms(), -1);
     if (idx < 0) {
         log_msg(LOG_WARN, "rproxy: 모든 백엔드가 down → 502");
-        rc = reply(fd, 502, keep_alive, is_head, res);
+        rc = reply(cl, 502, keep_alive, is_head, res);
         goto cleanup;
     }
     /* 연결 단계에서만, 최대 1회 재시도 */
@@ -157,11 +157,11 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
             break;
     }
     if (ufd == UPSTREAM_ELOCAL) {
-        rc = reply_x(fd, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
+        rc = reply_x(cl, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
         goto cleanup;
     }
     if (ufd < 0) {
-        rc = reply(fd, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, res);
+        rc = reply(cl, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, res);
         goto cleanup;
     }
 
@@ -173,17 +173,17 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         buf_append(&tgt, req->target, req->target_len);
     if (upstream_build_request(&out, req, tgt.data, tgt.len, p->backends[idx].name,
                                ci ? ci->ip : NULL) != BUF_OK) {
-        rc = reply(fd, 500, keep_alive, is_head, res);
+        rc = reply(cl, 500, keep_alive, is_head, res);
         goto cleanup;
     }
     (void)netio_set_send_timeout(ufd, p->read_timeout_ms);
     if (send_all(ufd, out.data, out.len) < 0) {
         log_msg(LOG_WARN, "rproxy: 백엔드 %s 로 요청 전송 실패", p->backends[idx].name);
-        rc = reply(fd, 502, keep_alive, is_head, res);
+        rc = reply(cl, 502, keep_alive, is_head, res);
         goto cleanup;
     }
 
-    relay = upstream_relay(ufd, fd, req, keep_alive, p->read_timeout_ms, NULL, NULL, &ur);
+    relay = upstream_relay(ufd, cl, req, keep_alive, p->read_timeout_ms, NULL, NULL, &ur);
     switch (relay) {
     case UPSTREAM_OK:
         res->status = ur.status;
@@ -192,11 +192,11 @@ int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         break;
     case UPSTREAM_ETIMEOUT:
         log_msg(LOG_WARN, "rproxy: 백엔드 %s 응답 타임아웃 → 504", p->backends[idx].name);
-        rc = reply(fd, 504, keep_alive, is_head, res);
+        rc = reply(cl, 504, keep_alive, is_head, res);
         break;
     case UPSTREAM_EBAD:
         log_msg(LOG_WARN, "rproxy: 백엔드 %s 응답 형식 오류 → 502", p->backends[idx].name);
-        rc = reply(fd, 502, keep_alive, is_head, res);
+        rc = reply(cl, 502, keep_alive, is_head, res);
         break;
     default: /* EPARTIAL / ECLIENT: 응답이 이미 나가는 중이었다 → 연결을 끊어 잘렸음을 알린다 */
         res->status = ur.status;

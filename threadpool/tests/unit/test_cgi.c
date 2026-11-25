@@ -318,7 +318,7 @@ static int handle(const char *raw, buf_t *resp)
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
         return -1;
     memset(&res, 0, sizeof res);
-    cgi_handle(&cctx, sv[0], &req, &ci, 1, &res);
+    cgi_handle(&cctx, &(conn_t){sv[0], NULL, 0}, &req, &ci, 1, &res);
     close(sv[0]);
     buf_reset(resp);
     while ((n = recv_some(sv[1], tmp, sizeof tmp, 2000)) > 0)

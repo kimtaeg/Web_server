@@ -84,3 +84,12 @@ int netio_set_send_timeout(int fd, int timeout_ms)
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     return setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
+
+int netio_set_recv_timeout(int fd, int timeout_ms)
+{
+    struct timeval tv;
+
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}

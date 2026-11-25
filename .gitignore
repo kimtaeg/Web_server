@@ -25,3 +25,5 @@ CLAUDE.md
 
 # Superpowers 작업 공간
 .superpowers/
+# 로컬 HTTPS 인증서·개인키 (make cert 로 생성, 개인키는 커밋 금지)
+certs/

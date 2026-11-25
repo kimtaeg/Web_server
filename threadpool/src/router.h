@@ -64,7 +64,7 @@ const route_t *router_match(const router_t *r, const char *host, size_t host_len
                             size_t path_len);
 
 /* conn_handler_fn. ctx 는 router_t*. */
-int router_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int router_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res);
 
 #endif /* ROUTER_H */

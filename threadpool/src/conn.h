@@ -12,7 +12,11 @@
 #include <signal.h>
 #include <stddef.h>
 
+#include "connio.h"
 #include "http_parser.h"
+#include "threadpool.h"
+
+struct ssl_ctx_st;
 
 typedef struct {
     int status;   /* 접근 로그용 응답 상태 */
@@ -26,10 +30,10 @@ typedef struct {
 } conn_info_t;
 
 /*
- * 응답을 fd 로 직접 보낸다. keep_alive 는 conn 이 결정한 값이며, 핸들러는 그대로
+ * 응답을 cl 로 직접 보낸다 (conn_write: 평문이면 send, TLS 면 SSL_write). keep_alive 는 conn 이 결정한 값이며, 핸들러는 그대로
  * Connection 헤더에 반영해야 한다. 반환 0 = 정상, -1 = I/O 실패(연결 종료).
  */
-typedef int (*conn_handler_fn)(void *ctx, int fd, const http_request_t *req,
+typedef int (*conn_handler_fn)(void *ctx, conn_t *cl, const http_request_t *req,
                                const conn_info_t *ci, int keep_alive, handler_result_t *res);
 
 typedef struct {
@@ -46,12 +50,21 @@ typedef struct {
     conn_handler_fn handler;
     void *handler_ctx;
     volatile sig_atomic_t *stop; /* NULL 가능. 설정되면 진행 중 요청까지만 처리하고 닫는다 */
+    /*
+     * HTTPS 용 SSL_CTX (tls.h). NULL 이면 HTTPS 꺼짐. main 이 워커 생성 전에 만들고 이후 읽기만 한다.
+     * 핸드셰이크 마감은 header_timeout_ms (0 이면 idle_timeout_ms).
+     */
+    struct ssl_ctx_st *tls_ctx;
 } conn_config_t;
 
-/* fd 의 소유권을 가져가 반드시 닫는다. */
-void conn_handle(int fd, const conn_config_t *cfg);
+/*
+ * fd 의 소유권을 가져가 반드시 닫는다.
+ * tls != 0 이면 먼저 TLS 핸드셰이크를 하고, 이후 모든 읽기/쓰기는 SSL 을 거친다 (cfg->tls_ctx 필요).
+ * 그 뒤의 요청 처리(파서, 핸들러, keep-alive, 타임아웃)는 HTTP 와 완전히 같다.
+ */
+void conn_handle(int fd, int tls, const conn_config_t *cfg);
 
 /* threadpool_fn 어댑터: arg 는 const conn_config_t*. */
-void conn_worker(int fd, void *arg);
+void conn_worker(threadpool_item_t item, void *arg);
 
 #endif /* CONN_H */

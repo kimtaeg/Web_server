@@ -36,4 +36,10 @@ ssize_t send_nowait(int fd, const void *p, size_t n);
 /* SO_SNDTIMEO 설정. 응답을 읽지 않는 클라이언트가 워커를 영원히 붙잡지 못하게 한다. 0/-1 */
 int netio_set_send_timeout(int fd, int timeout_ms);
 
+/*
+ * SO_RCVTIMEO 설정. recv_some 은 poll 로 기다리므로 필요 없지만, TLS 는 OpenSSL 이 소켓을 직접
+ * read 한다: 레코드 일부만 도착한 상태에서 SSL_read 가 영원히 블록하지 않도록 상한을 건다. 0/-1
+ */
+int netio_set_recv_timeout(int fd, int timeout_ms);
+
 #endif /* NETIO_H */

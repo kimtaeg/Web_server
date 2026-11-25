@@ -11,7 +11,7 @@ struct threadpool {
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
     /* --- mu 로 보호 --- */
-    int *q;      /* 원형 버퍼 */
+    threadpool_item_t *q; /* 원형 버퍼 */
     size_t cap;
     size_t head; /* 다음에 꺼낼 위치 */
     size_t count;
@@ -28,7 +28,7 @@ static void *worker_main(void *p)
     threadpool_t *tp = p;
 
     for (;;) {
-        int item;
+        threadpool_item_t item;
 
         pthread_mutex_lock(&tp->mu);
         /* while: 가짜 깨어남(spurious wakeup)과, 다른 워커가 먼저 가져간 경우를 모두 막는다 */
@@ -49,7 +49,7 @@ static void *worker_main(void *p)
 }
 
 /* mu 를 잡은 상태에서 호출. */
-static void push_locked(threadpool_t *tp, int item)
+static void push_locked(threadpool_t *tp, threadpool_item_t item)
 {
     tp->q[(tp->head + tp->count) % tp->cap] = item;
     tp->count++;
@@ -110,7 +110,7 @@ fail:
     return NULL;
 }
 
-int threadpool_try_submit(threadpool_t *tp, int item)
+int threadpool_try_submit(threadpool_t *tp, threadpool_item_t item)
 {
     int rc = -1;
 
@@ -123,7 +123,7 @@ int threadpool_try_submit(threadpool_t *tp, int item)
     return rc;
 }
 
-int threadpool_submit_wait(threadpool_t *tp, int item)
+int threadpool_submit_wait(threadpool_t *tp, threadpool_item_t item)
 {
     int rc = -1;
 

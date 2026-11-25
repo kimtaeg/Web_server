@@ -32,6 +32,7 @@ void config_defaults(config_t *c)
     c->cache_max_bytes = 64L * 1024 * 1024;
     c->cache_max_object_bytes = 1024L * 1024;
     c->cache_default_ttl_secs = 60;
+    c->https_port = 8443; /* tls_cert/tls_key 가 있을 때만 연다 */
 }
 
 int config_parse_hostport(const char *s, config_hostport_t *out)
@@ -108,6 +109,7 @@ static const struct {
     {"cache_max_bytes", offsetof(config_t, cache_max_bytes), 0, 16L * 1024 * 1024 * 1024},
     {"cache_max_object_bytes", offsetof(config_t, cache_max_object_bytes), 1, 1024L * 1024 * 1024},
     {"cache_default_ttl_secs", offsetof(config_t, cache_default_ttl_secs), 0, 365L * 86400},
+    {"https_port", offsetof(config_t, https_port), 1, 65535},
 };
 
 /* 토큰들로 지시어 하나를 처리. 오류면 메시지를 쓰고 -1. */
@@ -154,6 +156,15 @@ static int apply(config_t *c, char **tok, int nt, char *msg, size_t msz)
     if (strcmp(tok[0], "root") == 0) {
         if (nt != 2 || copy_str(c->root, sizeof c->root, tok[1]) != 0) {
             snprintf(msg, msz, "root 는 경로 하나가 필요하다");
+            return -1;
+        }
+        return 0;
+    }
+    if (strcmp(tok[0], "tls_cert") == 0 || strcmp(tok[0], "tls_key") == 0) {
+        char *dst = tok[0][4] == 'c' ? c->tls_cert : c->tls_key;
+
+        if (nt != 2 || copy_str(dst, PATH_MAX, tok[1]) != 0) {
+            snprintf(msg, msz, "%s 는 경로 하나가 필요하다", tok[0]);
             return -1;
         }
         return 0;

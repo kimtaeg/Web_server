@@ -14,7 +14,8 @@
  * 깨워야 해서 불필요한 깨어남(thundering herd)이 생긴다.
  * 메인 스레드는 try_submit 을 쓴다: accept 루프는 절대 기다리면 안 되기 때문.
  *
- * 큐에는 int(보통 클라이언트 fd)만 담는다. 풀은 fd 를 닫지 않는다 — 소유권은 작업 함수에 있다.
+ * 큐에는 작은 값 구조체(클라이언트 fd + 어느 리슨 소켓에서 왔는지)만 담는다.
+ * 풀은 fd 를 닫지 않는다 — 소유권은 작업 함수에 있다.
  */
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
@@ -22,16 +23,27 @@
 #include <stddef.h>
 
 typedef struct threadpool threadpool_t;
-typedef void (*threadpool_fn)(int item, void *arg);
+
+/*
+ * 큐 항목. 값으로 복사된다 (할당 없음).
+ * tls: HTTPS 리슨 소켓에서 받은 연결이면 1 → 워커가 TLS 핸드셰이크부터 한다.
+ * 핸드셰이크를 accept 스레드에서 하지 않는 이유: 느린 클라이언트 하나가 accept 루프 전체를 막는다.
+ */
+typedef struct {
+    int fd;
+    int tls;
+} threadpool_item_t;
+
+typedef void (*threadpool_fn)(threadpool_item_t item, void *arg);
 
 /* 실패 시 NULL. nworkers, qcap 은 1 이상. */
 threadpool_t *threadpool_create(size_t nworkers, size_t qcap, threadpool_fn fn, void *arg);
 
 /* 큐가 가득 찼거나 종료 중이면 즉시 -1 (호출자가 503 처리). 성공 0. */
-int threadpool_try_submit(threadpool_t *tp, int item);
+int threadpool_try_submit(threadpool_t *tp, threadpool_item_t item);
 
 /* 자리가 날 때까지 not_full 에서 기다린다. 종료 중이면 -1. */
-int threadpool_submit_wait(threadpool_t *tp, int item);
+int threadpool_submit_wait(threadpool_t *tp, threadpool_item_t item);
 
 /*
  * graceful shutdown 은 두 단계로 나뉜다 (main 의 종료 순서가 코드에 그대로 드러나도록):

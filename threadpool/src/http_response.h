@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include "buf.h"
+#include "connio.h"
 
 #define HTTP_SERVER_NAME "cweb/0.2"
 /* "Sun, 06 Nov 1994 08:49:37 GMT" 은 29자지만, gcc -Wformat-truncation 은 int 필드를 최악(11자리)으로
@@ -41,8 +42,8 @@ int http_response_head(buf_t *out, int status, const char *ctype, size_t content
 int http_response_build_status_page(buf_t *out, int status, int keep_alive, int head_only,
                                     const char *extra_headers);
 
-/* 위 페이지를 fd 로 보낸다. *sent 에 보낸 바이트 수. 반환 0 / -1(전송 실패). */
-int http_response_status_page(int fd, int status, int keep_alive, int head_only,
+/* 위 페이지를 클라이언트 연결(평문 또는 TLS)로 보낸다. *sent 에 보낸 바이트 수. 반환 0 / -1(전송 실패). */
+int http_response_status_page(conn_t *cl, int status, int keep_alive, int head_only,
                               const char *extra_headers, size_t *sent);
 
 #endif /* HTTP_RESPONSE_H */

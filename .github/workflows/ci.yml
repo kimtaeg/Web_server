@@ -24,7 +24,11 @@ jobs:
 
       - name: 의존 도구 (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd lsof curl gdb python3
+        run: sudo apt-get update && sudo apt-get install -y netcat-openbsd lsof curl gdb python3 libssl-dev openssl
+
+      - name: OpenSSL (macOS, threadpool 의 HTTPS)
+        if: runner.os == 'macOS'
+        run: brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
 
       - name: 컴파일러 정보
         run: cc --version && make --version | head -1
@@ -61,6 +65,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 의존 도구
-        run: sudo apt-get update && sudo apt-get install -y valgrind netcat-openbsd lsof curl
+        run: sudo apt-get update && sudo apt-get install -y valgrind netcat-openbsd lsof curl python3 libssl-dev openssl
       - name: make valgrind
         run: make valgrind
