@@ -27,7 +27,8 @@
 #include "tls.h"
 
 typedef struct {
-    char dir[PATH_MAX];
+    /* dir 을 결과 경로보다 짧게: "%s/server.crt" 가 잘릴 수 없음을 컴파일러(gcc -Wformat-truncation)가 안다 */
+    char dir[PATH_MAX - 64];
     char cert[PATH_MAX];  /* server.crt: key 와 짝 */
     char key[PATH_MAX];   /* server.key */
     char key2[PATH_MAX];  /* other.key: cert 와 짝이 아님 */
@@ -48,18 +49,22 @@ static EVP_PKEY *fx_gen_key(void)
 static X509 *fx_self_sign(EVP_PKEY *k)
 {
     X509 *x = X509_new();
-    X509_NAME *n;
+    X509_NAME *n = X509_NAME_new(); /* X509_get_subject_name 은 OpenSSL 4 에서 const 를 돌려준다 */
 
-    if (x == NULL)
+    if (x == NULL || n == NULL) {
+        X509_free(x);
+        X509_NAME_free(n);
         return NULL;
+    }
     X509_set_version(x, 2);
     ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
     X509_gmtime_adj(X509_getm_notBefore(x), 0);
     X509_gmtime_adj(X509_getm_notAfter(x), 86400);
     X509_set_pubkey(x, k);
-    n = X509_get_subject_name(x);
     X509_NAME_add_entry_by_txt(n, "CN", MBSTRING_ASC, (const unsigned char *)"localhost", -1, -1, 0);
-    X509_set_issuer_name(x, n);
+    X509_set_subject_name(x, n); /* 둘 다 복사해 간다 */
+    X509_set_issuer_name(x, n);  /* 자체 서명: 발급자 = 주체 */
+    X509_NAME_free(n);
     if (X509_sign(x, k, EVP_sha256()) <= 0) {
         X509_free(x);
         return NULL;
