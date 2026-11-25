@@ -7,6 +7,7 @@
 #   make leakcheck   : 서버 실행 → 요청 → SIGINT → 누수 0 확인
 #   make func-asan   : 기능 테스트 전체를 ASan 빌드 서버로
 #   make valgrind    : (Linux) 단위 + 기능 테스트를 valgrind 로, 오류·누수 0 확인
+#   make cert        : HTTPS 테스트용 자체 서명 인증서 certs/server.{crt,key} 생성
 #   make clean       : build/ 삭제
 #
 # 모드마다 build/<mode>/ 에 따로 빌드한다. 같은 .o 를 다른 플래그로 섞어 링크하는 사고를 막기 위해서다.
@@ -38,12 +39,29 @@ else
   $(error 알 수 없는 MODE=$(MODE) (release|debug|asan))
 endif
 
-CFLAGS := $(CSTD) $(MODEFLAGS) -Isrc -MMD -MP
-LDLIBS := -pthread
+# ---- OpenSSL (HTTPS) ----
+# pkg-config 가 있으면 그것을, 없으면 macOS Homebrew(openssl@3, openssl@1.1) 경로를 쓴다.
+# OPENSSL_PREFIX=/경로 로 직접 지정할 수도 있다. 1.1.0 이상 필요.
+# -isystem: OpenSSL 헤더 안의 경고가 -Werror -pedantic 에 걸리지 않게 (우리 코드에는 그대로 적용).
+# OPENSSL_API_COMPAT: 1.1.0 API 기준으로 컴파일 (그보다 오래된 함수를 쓰면 컴파일 오류).
+OPENSSL_PREFIX ?= $(shell pkg-config --variable=prefix openssl 2>/dev/null)
+ifeq ($(OPENSSL_PREFIX),)
+  OPENSSL_PREFIX := $(firstword $(foreach v,openssl@3 openssl@1.1 openssl,$(shell brew --prefix $(v) 2>/dev/null)))
+endif
+# /usr 이면 기본 검색 경로라 아무것도 붙이지 않는다 (-isystem /usr/include 는 include 순서를 깬다)
+ifneq ($(filter-out /usr,$(OPENSSL_PREFIX)),)
+  SSL_CFLAGS := -isystem $(OPENSSL_PREFIX)/include
+  SSL_LIBS := -L$(OPENSSL_PREFIX)/lib
+endif
+SSL_CFLAGS += -DOPENSSL_API_COMPAT=0x10100000L
+SSL_LIBS += -lssl -lcrypto
+
+CFLAGS := $(CSTD) $(MODEFLAGS) -Isrc $(SSL_CFLAGS) -MMD -MP
+LDLIBS := -pthread $(SSL_LIBS)
 
 # 구현이 끝난 모듈만 나열한다. 빈 모듈은 -pedantic 에서 "빈 번역 단위" 오류가 나므로
 # 각 단계에서 구현할 때 여기에 추가한다.
-MODULES := buf http_parser mime netio log http_response threadpool server conn static router cgi config upstream rproxy cache fproxy
+MODULES := buf http_parser mime netio log http_response threadpool server conn static router cgi config upstream rproxy cache fproxy tls connio
 
 BUILD     := build/$(MODE)
 LIB_OBJS  := $(patsubst %,$(BUILD)/obj/%.o,$(MODULES))
@@ -55,7 +73,7 @@ TEST_BINS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(TEST_SRCS))
 CGI_SRCS  := $(wildcard cgi-bin/*.c)
 CGI_BINS  := $(patsubst cgi-bin/%.c,$(BUILD)/cgi-bin/%,$(CGI_SRCS))
 
-.PHONY: all debug asan test func func-asan valgrind leakcheck clean bin unit unit-run
+.PHONY: all debug asan test func func-asan valgrind leakcheck clean bin unit unit-run cert
 
 all: bin
 
@@ -113,6 +131,10 @@ $(BUILD)/tests/%: tests/unit/%.c $(LIB_OBJS)
 $(BUILD)/cgi-bin/%: cgi-bin/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+# 로컬 실행용 자체 서명 인증서 (테스트 스크립트는 각자 임시 인증서를 만든다)
+cert:
+	@bash tools/gen-cert.sh certs
 
 clean:
 	rm -rf build

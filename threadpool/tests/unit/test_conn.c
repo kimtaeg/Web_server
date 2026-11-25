@@ -19,7 +19,7 @@
 #include "netio.h"
 
 /* 응답 본문 = 요청 경로. */
-static int echo_handler(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci, int ka,
+static int echo_handler(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci, int ka,
                         handler_result_t *res)
 {
     buf_t b;
@@ -30,7 +30,7 @@ static int echo_handler(void *ctx, int fd, const http_request_t *req, const conn
     buf_init(&b, 0, 4096);
     http_response_head(&b, 200, "text/plain", req->path_len, ka, NULL);
     buf_append(&b, req->path, req->path_len);
-    if (send_all(fd, b.data, b.len) < 0)
+    if (conn_write(cl, b.data, b.len) < 0)
         rc = -1;
     res->status = 200;
     res->bytes = b.len;
@@ -47,7 +47,7 @@ static void *conn_main(void *p)
 {
     conn_arg_t *a = p;
 
-    conn_handle(a->fd, &a->cfg);
+    conn_handle(a->fd, 0, &a->cfg);
     return NULL;
 }
 

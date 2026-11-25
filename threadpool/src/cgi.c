@@ -450,18 +450,18 @@ static int build_env(buf_t *store, char *envp[CGI_ENV_MAX], const http_request_t
     return 0;
 }
 
-static int reply_status(int fd, int status, int ka, int head, const char *extra,
+static int reply_status(conn_t *cl, int status, int ka, int head, const char *extra,
                         handler_result_t *res)
 {
     size_t sent = 0;
-    int rc = http_response_status_page(fd, status, ka, head, extra, &sent);
+    int rc = http_response_status_page(cl, status, ka, head, extra, &sent);
 
     res->status = status;
     res->bytes = sent;
     return rc;
 }
 
-int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci, int keep_alive,
+int cgi_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci, int keep_alive,
                handler_result_t *res)
 {
     const cgi_ctx_t *c = ctx;
@@ -487,34 +487,34 @@ int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *
     buf_init(&hdrs, 0, CGI_MAX_HEADERS_BYTES);
 
     if (req->method != HTTP_GET && req->method != HTTP_HEAD && req->method != HTTP_POST) {
-        rc = reply_status(fd, 405, keep_alive, is_head, "Allow: GET, HEAD, POST\r\n", res);
+        rc = reply_status(cl, 405, keep_alive, is_head, "Allow: GET, HEAD, POST\r\n", res);
         goto cleanup;
     }
     /* "/cgi-bin/<name>" 에서 name 추출. 하위 경로(PATH_INFO)는 지원하지 않는다. */
     if (req->path_len <= c->prefix_len + 1 || req->path[c->prefix_len] != '/') {
-        rc = reply_status(fd, 404, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 404, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     name = req->path + c->prefix_len + 1;
     nlen = req->path_len - c->prefix_len - 1;
     if (!cgi_script_name_ok(name, nlen)) {
-        rc = reply_status(fd, 404, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 404, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     if ((size_t)snprintf(path, sizeof path, "%s/%.*s", c->dir, (int)nlen, name) >= sizeof path) {
-        rc = reply_status(fd, 414, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 414, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     if (stat(path, &st) != 0) {
-        rc = reply_status(fd, errno == ENOENT ? 404 : 403, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, errno == ENOENT ? 404 : 403, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     if (!S_ISREG(st.st_mode) || access(path, X_OK) != 0) {
-        rc = reply_status(fd, 403, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 403, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     if (build_env(&env, envp, req, ci, req->path, req->path_len) != 0) {
-        rc = reply_status(fd, 500, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 500, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
 
@@ -524,12 +524,12 @@ int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *
                                           "출력 상한 초과"};
 
         log_msg(LOG_WARN, "CGI %s (pid %ld): %s", path, (long)pid, why[-run]);
-        rc = reply_status(fd, run == CGI_ERR_TIMEOUT ? 504 : 500, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, run == CGI_ERR_TIMEOUT ? 504 : 500, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     if (cgi_parse_output(out.data ? out.data : "", out.len, &status, &hdrs, &body_off) != 0) {
         log_msg(LOG_WARN, "CGI %s: 출력 헤더 형식 오류", path);
-        rc = reply_status(fd, 500, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 500, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
 
@@ -541,11 +541,11 @@ int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *
     if (http_response_head(&head, status, NULL, out.len - body_off, keep_alive,
                            hdrs.len ? hdrs.data : NULL) != BUF_OK ||
         (!is_head && buf_append(&head, out.data + body_off, out.len - body_off) != BUF_OK)) {
-        rc = reply_status(fd, 500, keep_alive, is_head, NULL, res);
+        rc = reply_status(cl, 500, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     res->status = status;
-    if (send_all(fd, head.data, head.len) < 0) {
+    if (conn_write(cl, head.data, head.len) < 0) {
         rc = -1;
         goto cleanup;
     }

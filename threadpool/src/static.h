@@ -54,7 +54,7 @@ typedef struct {
 int static_init(static_ctx_t *s, const char *root);
 
 /* conn_handler_fn. GET/HEAD 만 허용 (그 외 405 + Allow). */
-int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int static_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res);
 
 #endif /* STATIC_H */

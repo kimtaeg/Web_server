@@ -15,6 +15,7 @@ static int gate_open;
 static int started;
 static int done;
 static long sum;
+static int tls_seen; /* mu 로 보호 */
 
 static void reset(int open)
 {
@@ -22,10 +23,20 @@ static void reset(int open)
     gate_open = open;
     started = done = 0;
     sum = 0;
+    tls_seen = 0;
     pthread_mutex_unlock(&mu);
 }
 
-static void job(int item, void *arg)
+static threadpool_item_t it(int fd)
+{
+    threadpool_item_t x;
+
+    x.fd = fd;
+    x.tls = 0;
+    return x;
+}
+
+static void job(threadpool_item_t item, void *arg)
 {
     (void)arg;
     pthread_mutex_lock(&mu);
@@ -33,7 +44,8 @@ static void job(int item, void *arg)
     pthread_cond_broadcast(&cv);
     while (!gate_open)
         pthread_cond_wait(&cv, &mu);
-    sum += item;
+    sum += item.fd;
+    tls_seen += item.tls;
     done++;
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
@@ -65,7 +77,7 @@ static void test_all_jobs_run(void)
     tp = threadpool_create(4, 16, job, NULL);
     REQUIRE(tp != NULL);
     for (i = 1; i <= 1000; i++) {
-        CHECK_EQ_INT(threadpool_submit_wait(tp, i), 0);
+        CHECK_EQ_INT(threadpool_submit_wait(tp, it(i)), 0);
         want += i;
     }
     threadpool_destroy(tp); /* 큐에 남은 것까지 처리 후 종료 */
@@ -90,7 +102,7 @@ static void *waiter_main(void *p)
 {
     waiter_t *w = p;
 
-    w->rc = threadpool_submit_wait(w->tp, 100);
+    w->rc = threadpool_submit_wait(w->tp, it(100));
     pthread_mutex_lock(&mu);
     w->returned = 1;
     pthread_mutex_unlock(&mu);
@@ -115,11 +127,11 @@ static void test_full_queue(void)
     reset(0);
     tp = threadpool_create(1, 2, job, NULL);
     REQUIRE(tp != NULL);
-    CHECK_EQ_INT(threadpool_try_submit(tp, 1), 0);
+    CHECK_EQ_INT(threadpool_try_submit(tp, it(1)), 0);
     wait_started(1);
-    CHECK_EQ_INT(threadpool_try_submit(tp, 2), 0);
-    CHECK_EQ_INT(threadpool_try_submit(tp, 3), 0);
-    CHECK_EQ_INT(threadpool_try_submit(tp, 4), -1);
+    CHECK_EQ_INT(threadpool_try_submit(tp, it(2)), 0);
+    CHECK_EQ_INT(threadpool_try_submit(tp, it(3)), 0);
+    CHECK_EQ_INT(threadpool_try_submit(tp, it(4)), -1);
 
     w.tp = tp;
     w.rc = -99;
@@ -150,9 +162,9 @@ static void test_destroy_releases_waiter(void)
     reset(0);
     tp = threadpool_create(1, 1, job, NULL);
     REQUIRE(tp != NULL);
-    threadpool_try_submit(tp, 1);
+    threadpool_try_submit(tp, it(1));
     wait_started(1);
-    threadpool_try_submit(tp, 2); /* 큐 가득 */
+    threadpool_try_submit(tp, it(2)); /* 큐 가득 */
     w.tp = tp;
     w.rc = -99;
     w.returned = 0;
@@ -174,14 +186,14 @@ static void test_close_then_join(void)
     reset(0);
     tp = threadpool_create(1, 4, job, NULL);
     REQUIRE(tp != NULL);
-    threadpool_try_submit(tp, 1);
+    threadpool_try_submit(tp, it(1));
     wait_started(1);
-    threadpool_try_submit(tp, 2);
-    threadpool_try_submit(tp, 3);
+    threadpool_try_submit(tp, it(2));
+    threadpool_try_submit(tp, it(3));
 
     threadpool_close(tp); /* 워커가 게이트에 막혀 있어도 즉시 돌아와야 한다 */
-    CHECK_EQ_INT(threadpool_try_submit(tp, 4), -1);
-    CHECK_EQ_INT(threadpool_submit_wait(tp, 5), -1);
+    CHECK_EQ_INT(threadpool_try_submit(tp, it(4)), -1);
+    CHECK_EQ_INT(threadpool_submit_wait(tp, it(5)), -1);
     threadpool_close(tp); /* 멱등 */
 
     open_gate();
@@ -198,9 +210,26 @@ static void test_join_free_without_close(void)
     reset(1);
     tp = threadpool_create(2, 4, job, NULL);
     REQUIRE(tp != NULL);
-    threadpool_try_submit(tp, 7);
+    threadpool_try_submit(tp, it(7));
     threadpool_join_free(tp);
     CHECK_EQ_INT(done, 1);
+}
+
+/* 큐 항목의 tls 플래그가 워커까지 그대로 전달된다 (HTTP/HTTPS 리슨 소켓 구분) */
+static void test_item_flags_pass_through(void)
+{
+    threadpool_t *tp;
+    threadpool_item_t a = {3, 1}, b = {4, 0};
+
+    reset(1);
+    tp = threadpool_create(2, 4, job, NULL);
+    REQUIRE(tp != NULL);
+    CHECK_EQ_INT(threadpool_try_submit(tp, a), 0);
+    CHECK_EQ_INT(threadpool_submit_wait(tp, b), 0);
+    threadpool_join_free(tp);
+    CHECK_EQ_INT(done, 2);
+    CHECK_EQ_INT(sum, 7);
+    CHECK_EQ_INT(tls_seen, 1);
 }
 
 int main(void)
@@ -211,5 +240,6 @@ int main(void)
     RUN_TEST(test_destroy_releases_waiter);
     RUN_TEST(test_close_then_join);
     RUN_TEST(test_join_free_without_close);
+    RUN_TEST(test_item_flags_pass_through);
     TEST_END();
 }

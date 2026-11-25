@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # tests/leak/leakcheck.sh — 서버 실행 → 여러 종류의 요청 → SIGINT(Ctrl+C) → 누수 보고.
+#   HTTP 와 HTTPS(TLS) 포트를 함께 띄워, TLS 경로(핸드셰이크 성공·실패, SSL 객체 해제)도 검사한다.
 #
 #   Linux : ASan 빌드 + LeakSanitizer (detect_leaks=1). 누수/메모리 오류 모두 한 번에.
 #   macOS : arm64 macOS 의 ASan 은 LeakSanitizer 를 지원하지 않는다.
@@ -17,6 +18,7 @@ mkdir -p "$WWW/docs"
 printf '<h1>home</h1>' >"$WWW/index.html"
 printf 'docs' >"$WWW/docs/index.html"
 head -c 500000 /dev/urandom >"$WWW/big.bin"
+bash "$(dirname "$0")/../../tools/gen-cert.sh" "$TMP/certs" >/dev/null
 
 # 리버스 프록시 경로용 백엔드 하나 (release 빌드 — 누수 검사 대상은 프록시 쪽)
 mkdir -p "$TMP/wwwB"
@@ -58,9 +60,23 @@ traffic() {
     curl -s -o /dev/null -x "127.0.0.1:$PORT" -I "http://127.0.0.1:$BACKEND_PORT/"         # fproxy HEAD HIT
     curl -s -o /dev/null -x "127.0.0.1:$PORT" "http://127.0.0.1:1/"                        # fproxy 502
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"; printf 'GET / HTTP/1.1\r\nHo' >&5; exec 5>&-     # 중간 끊김
+    # ---- HTTPS: 연결마다 SSL 객체가 만들어지고 모든 경로에서 해제돼야 한다 ----
+    curl -sk -o /dev/null "$(surl /)"                                                     # TLS 정상
+    curl -sk -o /dev/null "$(surl /big.bin)"                                              # 부분 쓰기
+    curl -sk -o /dev/null -o /dev/null "$(surl /)" "$(surl /nope)"                        # TLS keep-alive
+    curl -sk -o /dev/null -X POST --data-binary @"$WWW/big.bin" "$(surl /cgi-bin/echo)"  # TLS + CGI
+    curl -sk -o /dev/null "$(surl /api/)"                                                 # TLS + 프록시
+    curl -s -o /dev/null "$(surl /)"                                                      # 인증서 거부(unknown ca)
+    curl -s -o /dev/null "http://127.0.0.1:$HPORT/"                                       # 평문 → 400
+    openssl s_client -connect "127.0.0.1:$HPORT" -tls1_1 </dev/null >/dev/null 2>&1       # 버전 거부
+    openssl s_client -connect "127.0.0.1:$HPORT" </dev/null >/dev/null 2>&1               # 요청 없이 끊김
+    exec 5<>"/dev/tcp/127.0.0.1/$HPORT"; printf '\x16\x03\x01\x02\x00\x01' >&5; exec 5>&-  # 핸드셰이크 도중 끊김
+    exec 6<>"/dev/tcp/127.0.0.1/$HPORT"                                                   # 핸드셰이크 대기 중 SIGINT
     exec 5<>"/dev/tcp/127.0.0.1/$PORT"                                                    # 유휴 연결을 연 채로
     sleep 0.3                                                                             # SIGINT 를 맞게 한다
 }
+
+surl() { echo "https://127.0.0.1:$HPORT$1"; }
 
 # start_server 를 쓰지 않고 직접 띄운다: leaks 가 서버를 자식으로 실행하기 때문
 launch() { # launch <바이너리> <명령...>; SERVER_PID 는 신호를 보낼 "서버 프로세스" pid
@@ -68,8 +84,9 @@ launch() { # launch <바이너리> <명령...>; SERVER_PID 는 신호를 보낼 
     cgi="$(cd "$(dirname "$1")" && pwd)/cgi-bin" # 서버 바이너리 옆에 빌드된 예제 CGI
     shift
     PORT=$((20000 + (RANDOM % 20000)))
+    HPORT=$((PORT + 1))
     "$@" -f "$TMP/leak.conf" -H 127.0.0.1 -p "$PORT" -r "$WWW" -g "$cgi" -c 1000 -w 4 -q 16 -t 2000 \
-        >"$SERVER_LOG" 2>&1 &
+        -C "$TMP/certs/server.crt" -K "$TMP/certs/server.key" -s "$HPORT" >"$SERVER_LOG" 2>&1 &
     LAUNCH_PID=$!
     for i in $(seq 1 100); do
         curl -s -o /dev/null --max-time 1 "$(url /)" && break
@@ -85,6 +102,7 @@ finish_run() { # SIGINT 후 종료 코드를 RUN_RC 에
     wait "$LAUNCH_PID"
     RUN_RC=$?
     exec 5>&- 2>/dev/null
+    exec 6>&- 2>/dev/null
     # leaks --atExit 는 검사 동안 대상 프로세스를 정지(T)시키고, 검사가 끝나도 그대로 남겨 둔다
     # (실측: 정지된 고아 프로세스가 실행마다 하나씩 쌓였다). 검사가 끝났으니 확실히 정리한다.
     if [ "$target" != "$LAUNCH_PID" ] && kill -0 "$target" 2>/dev/null; then
@@ -123,4 +141,5 @@ else
 fi
 echo "--- 접근 로그 일부 ---"
 grep -E '\[INFO\] [0-9.:-]+ "' "$SERVER_LOG" | grep -E 'cgi-bin|/api|/dead|http://| "GET / ' | head -20
+check_contains "TLS 경로를 실제로 밟음 (핸드셰이크 실패 로그)" "tls: 핸드셰이크" "$(cat "$SERVER_LOG")"
 finish

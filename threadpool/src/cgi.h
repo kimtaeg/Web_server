@@ -92,7 +92,7 @@ int cgi_run(const char *path, char *const envp[], const char *body, size_t body_
             size_t max_output, buf_t *out, pid_t *pid_out);
 
 /* conn_handler_fn. GET/HEAD/POST 만 허용 (그 외 405). */
-int cgi_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci, int keep_alive,
+int cgi_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci, int keep_alive,
                handler_result_t *res);
 
 #endif /* CGI_H */

@@ -67,13 +67,21 @@ static void test_parse_full(void)
                        "forward_proxy on\n"
                        "cache_max_bytes 1000000\n"
                        "cache_max_object_bytes 5000\n"
-                       "cache_default_ttl_secs 0\n";
+                       "cache_default_ttl_secs 0\n"
+                       "https_port 9443\n"
+                       "tls_cert /etc/x/server.crt\n"
+                       "tls_key  /etc/x/server.key\n";
 
     config_defaults(&c);
+    CHECK_EQ_INT((int)c.https_port, 8443); /* 기본값 */
+    CHECK_EQ_STR(c.tls_cert, "");          /* 인증서가 없으면 HTTPS 꺼짐 */
     CHECK_EQ_INT(c.forward_proxy, 0); /* 기본값: 포워드 프록시 꺼짐 (open proxy 방지) */
     CHECK_EQ_INT(config_parse_string(text, &c, err, sizeof err), 0);
     CHECK_EQ_STR(err, "");
     CHECK_EQ_STR(c.listen_host, "127.0.0.1");
+    CHECK_EQ_INT((int)c.https_port, 9443);
+    CHECK_EQ_STR(c.tls_cert, "/etc/x/server.crt");
+    CHECK_EQ_STR(c.tls_key, "/etc/x/server.key");
     CHECK_EQ_INT(c.listen_port, 9090);
     CHECK_EQ_STR(c.root, "/srv/www");
     CHECK_EQ_STR(c.cgi_prefix, "/cgi-bin");
@@ -123,6 +131,9 @@ static void test_parse_errors(void)
         {"workers 2\nqueue 2\nfoo\n", "line 3:"},
         {"forward_proxy yes\n", "line 1: forward_proxy 는 on 또는 off"},
         {"cache_max_object_bytes 0\n", "line 1:"},
+        {"https_port 70000\n", "line 1: 'https_port'"},
+        {"tls_cert\n", "line 1: tls_cert 는 경로"},
+        {"tls_key a b\n", "line 1: tls_key 는 경로"},
     };
     size_t i;
 

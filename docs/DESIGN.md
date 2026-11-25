@@ -2,7 +2,7 @@
 
 각 결정은 "무엇을 / 왜 / 대안과 버린 이유" 순서로 적는다. 단계가 진행될 때마다 추가한다.
 
-0~15절은 스레드 풀 구현(`threadpool/`), 16절은 I/O 멀티플렉싱 구현(`multiplex/`)에 대한 내용이다. 문서 안의 `src/`, `tests/`, `build/` 경로는
+0~15절은 스레드 풀 구현(`threadpool/`), 16절은 I/O 멀티플렉싱 구현(`multiplex/`), 17절은 스레드 풀 구현에 더한 HTTPS(TLS)에 대한 내용이다. 문서 안의 `src/`, `tests/`, `build/` 경로는
 `threadpool/` 기준이다(부하 테스트 `tests/load/`만 저장소 루트).
 
 ## 0. 전체 구조
@@ -504,6 +504,10 @@ put은 malloc과 memcpy를 **락 밖에서** 하고, write lock 안에서는 연
 | 프록시 루프 | 라우트가 자기 자신을 가리킴 | 인스턴스별 Via 표식이 돌아오면 508 | test_upstream, fproxy.sh |
 | httpoxy | `Proxy:` 헤더 → CGI의 `HTTP_PROXY` | Proxy 헤더는 CGI 환경 변수로 넘기지 않음 | rproxy.sh |
 | 캐시 오염과 유출 | 다른 사용자의 응답 재사용 | Authorization 요청, Set-Cookie, private, no-store 응답은 저장 안 함 | test_fproxy, fproxy.sh |
+| TLS 다운그레이드 | 낡은 TLS 1.0/1.1로 협상 유도 | `SSL_CTX_set_min_proto_version(TLS1_2)` | test_tls, tls.sh |
+| TLS 재협상 DoS | 클라이언트가 재협상을 반복해 서버 CPU 소모 | `SSL_OP_NO_RENEGOTIATION` | 코드 리뷰 |
+| 핸드셰이크 지연 | 연결만 하고 ClientHello를 안 보냄 | 핸드셰이크 전체 마감(헤더 마감 시간), non-blocking + poll (17절) | test_tls, tls.sh |
+| 잘못된 인증서 운용 | 키·인증서 불일치, 파일 누락 | 시작 시 `SSL_CTX_check_private_key`로 거부 | test_tls, tls.sh |
 | CGI | 이름 조작, fd 유출, 좀비, 무한 실행 | 이름 화이트리스트, CLOEXEC, 프로세스 그룹 kill, 타임아웃 504, 서버 환경 변수 비전달 | test_cgi, cgi.sh |
 
 ## 15. 테스트
@@ -661,3 +665,127 @@ multiplex.sh의 "헤더를 보내다 만 연결 1000개 중에도 즉시 응답"
   연결을 연 뒤에는 기다리지 않는다.
 - 같은 조건을 다시 재면 ±50%까지 흔들린다(노트북에서 1회 측정). 연결 2000개에서 두 서버 모두 wrk 읽기 오류가
   수백 건 나왔는데, 원인은 확인하지 않았다.
+
+## 17. HTTPS (TLS) — 스레드 풀 판 (`tls`, `connio`)
+
+목표는 TLS를 직접 구현하는 것이 아니다. 기존 소켓 서버에 **OpenSSL로 TLS 계층을 끼워 넣는 것**이다.
+암호와 프로토콜은 전부 OpenSSL이 하고, 우리 코드는 "어디에 끼우는가"와 "자원을 어떻게 회수하는가"만 책임진다.
+
+### 어디에 끼우는가: 클라이언트 I/O 경계 한 곳
+- **TLS가 닿는 곳을 셌다.** 클라이언트 소켓을 직접 읽고 쓰는 곳은 다음이 전부였다.
+  - `conn`: 수신, 408 응답, 종료
+  - `http_response_status_page`
+  - `static`: 2곳
+  - `cgi`: 1곳
+  - `fproxy`의 캐시 HIT
+  - `upstream_relay`: 3곳
+- **이 경계를 `conn_t {fd, ssl}`로 바꿨다.** 핸들러 시그니처의 `int fd`를 `conn_t *`로 바꾸고,
+  `send_all`/`recv_some`을 `conn_write`/`conn_read`로 바꿨다.
+  - `ssl == NULL`이면 래퍼가 기존 함수를 그대로 부르므로 HTTP 동작은 바이트 단위로 같다.
+  - 기존 기능 테스트 177개가 그대로 통과한다.
+- **업스트림(서버 → 백엔드)은 평문 그대로 `netio`를 쓴다.** 업스트림 TLS는 범위 밖이다.
+- **대안은 버렸다.** 핸들러마다 `if (ssl) SSL_write else send_all`을 넣는 방식이다.
+  분기가 10곳에 흩어지고, 하나라도 빠뜨리면 그 경로만 평문으로 나간다.
+- **`connio.h`는 OpenSSL 헤더를 include하지 않는다.** `struct ssl_st *`(불완전 타입)만 들고 있어서,
+  핸들러 모듈은 OpenSSL을 몰라도 컴파일된다.
+- **`conn_readline`은 만들지 않았다.** 파서가 바이트 버퍼를 받는 증분 파서(3절)라서,
+  줄 단위로 읽는 코드가 처음부터 없다.
+
+### HTTP 8080 + HTTPS 8443 동시 수신
+- **accept 스레드**: `server_run`은 리슨 소켓 여러 개를 poll 하나로 기다린다. 준비된 소켓마다 한 번씩
+  accept하므로 한쪽 포트가 몰려도 다른 포트가 굶지 않는다.
+- **큐 항목**: `int fd`에서 `{fd, tls}`로 바뀌었다. 아키텍처 변경은 이것 하나다. 값 복사라 할당은 없다.
+- **핸드셰이크는 워커가 한다.** accept 스레드가 하면 느린 클라이언트 하나가 accept 루프 전체를 막는다.
+- **큐가 가득 차면 HTTPS 연결은 응답 없이 닫는다.** 핸드셰이크 전이라 503을 암호화할 수 없고,
+  핸드셰이크를 accept 스레드에서 하면 위와 같은 이유로 안 된다.
+
+### 핸드셰이크만 non-blocking, 데이터 단계는 blocking + `SSL_MODE_AUTO_RETRY`
+- **데이터 단계**: 기존 구조대로 blocking 소켓을 쓴다(`SO_SNDTIMEO`).
+  - AUTO_RETRY를 켜면 TLS 1.3 세션 티켓 같은 비데이터 레코드를 처리한 뒤에도 `SSL_read`가 `WANT_READ`로
+    돌아오지 않는다.
+  - 그래서 blocking 소켓에서 `WANT_READ`/`WANT_WRITE`는 "소켓 타임아웃 만료"라는 뜻 하나만 남는다(`tls_io_fail`).
+- **핸드셰이크**는 소켓을 잠시 `O_NONBLOCK`으로 바꾸고 `SSL_accept`를 반복한다. `WANT_READ`면 POLLIN,
+  `WANT_WRITE`면 POLLOUT으로 기다리고, 끝나면 blocking으로 되돌린다.
+  - 이렇게 하는 이유: blocking `SSL_accept`는 수신 한 번마다 타임아웃이 다시 시작된다. 아무것도 보내지 않거나
+    1바이트씩 보내는 클라이언트가 워커를 붙잡는 **총 시간**을 묶을 수 없다.
+  - 지금은 헤더 마감(`-T`)을 핸드셰이크 전체 마감으로 쓴다. 250ms마다 종료 플래그도 본다.
+- **한계**: 핸드셰이크 뒤에 TLS 레코드 하나를 아주 천천히 보내는 클라이언트가 있다.
+  - OpenSSL은 레코드가 다 올 때까지 소켓을 계속 read하므로, `SSL_read` 하나가 헤더 마감을 넘어서 블록할 수 있다.
+  - 막는 것은 수신 한 번마다 다시 세는 `SO_RCVTIMEO`(유휴 타임아웃)뿐이다.
+  - 연결당 워커 하나 모델의 slowloris 한계(12절)와 같은 종류다.
+  - 제대로 고치려면 데이터 단계도 non-blocking으로 만들거나, 이벤트 루프 판(16절)에 TLS를 붙여야 한다.
+
+### `SSL_pending` — 복호화된 바이트는 poll에 보이지 않는다
+- **문제 상황**: OpenSSL은 레코드 단위로 읽고 복호화한다.
+  - 레코드 하나에 요청 두 개가 오면(파이프라이닝) 첫 `SSL_read`가 다 가져가지 못한 평문이 OpenSSL 안에 남는다.
+  - 커널 소켓 버퍼는 비어 있으므로 poll은 "읽을 것 없음"이라고 답한다.
+  - 그대로 두면 두 번째 요청은 다음 바이트가 올 때까지, 즉 유휴 타임아웃까지 멈춘다.
+- **해결**: `conn_read`는 `SSL_pending() > 0`이면 poll 없이 바로 `SSL_read`한다.
+- **검증**: `test_ssl_pending_not_lost`가 "AAAABBBB"를 한 레코드로 보내고 4바이트씩 읽는다. 두 번째 읽기 직전에
+  poll이 0을 돌려주는 것도 함께 확인한다.
+- **돌연변이 검사**: `SSL_pending` 검사를 지우면 이 테스트가 `NETIO_TIMEOUT(-2) != 4`로 실패한다(확인함).
+
+### 닫기: close_notify와 `tls_broken`
+- **close_notify를 보낸다.** 정상 종료면 `SSL_shutdown`으로 close_notify를 한 번 보낸 뒤 `SSL_free`한다.
+  이 신호로 상대는 "잘린 응답(truncation attack)이 아니라 정상 종료"임을 안다.
+- **상대의 close_notify는 기다리지 않는다.** 응답 경계는 이미 Content-Length로 전달됐다.
+  기다리면 워커만 묶인다.
+- **치명적 오류 뒤에는 `SSL_shutdown`을 부르면 안 된다**(OpenSSL 문서). 대상은 `SSL_ERROR_SYSCALL`,
+  `SSL_ERROR_SSL`, 그리고 쓰다 만 `SSL_write`다.
+  - `conn_t.tls_broken`에 이 상태를 기록하고, `tls_close`가 이를 보고 건너뛴다.
+  - 같은 이유로 이후의 `conn_read`/`conn_write`는 곧바로 실패한다.
+- **이후 순서는 HTTP와 같다**: `shutdown(SHUT_WR)` → 남은 입력 비우기(암호문이라 소켓에서 직접 읽는다) → `close`.
+  SSL 객체는 fd를 닫지 않는다(`SSL_set_fd`의 소켓 BIO는 NOCLOSE). 그래서 fd 소유권은 끝까지 `conn`에 있다.
+- **close_notify 없이 끊기면**: OpenSSL 3은 `SSL_ERROR_SYSCALL`이 아니라 `SSL_R_UNEXPECTED_EOF_WHILE_READING`
+  오류로 보고한다. 둘 다 EOF로 다룬다.
+
+### 오류 기록
+- **무엇을 남기나**: `SSL_get_error` 결과 이름, errno, 그리고 스레드의 OpenSSL 오류 큐. 예:
+  `tlsv1 alert unknown ca`(curl이 인증서를 거부함), `unsupported protocol`(TLS 1.1).
+- **`ERR_print_errors_fp(stderr)` 대신 `ERR_print_errors_cb` → `log_msg`를 쓴다.**
+  `log_msg`는 한 줄을 락 안에서 쓰므로 여러 워커의 줄이 섞이지 않는다. 내용은 같다.
+  출력하면 큐가 비워진다. 매 SSL 호출 전에는 `ERR_clear_error`로 이전 잔여 오류가 `SSL_get_error`를 속이지 않게 한다.
+- **로그 등급**: 상대가 그냥 떠난 경우(EOF, EPIPE, ECONNRESET)는 흔하므로 DEBUG로 남긴다.
+  핸드셰이크 실패와 쓰기 타임아웃은 WARN으로 남긴다.
+- **평문 HTTP 감지**: HTTPS 포트에 평문 HTTP가 오면 OpenSSL이 `SSL_R_HTTP_REQUEST`로 알려 준다.
+  이때는 평문 400과 원인 헤더를 보낸다(nginx와 같은 방식). `curl http://...:8443`을 잘못 친 사람이 원인을 바로 안다.
+
+### CGI
+- **CGI는 처음부터 이렇게 만들어져 있었다.** 출력을 파이프로 받아 버퍼에 모은 뒤 Content-Length를 붙여 보낸다(9절).
+  마지막 `send_all` 한 줄이 `conn_write`가 되면서 `SSL_write`로 암호화된다.
+- **CGI의 stdout을 소켓에 `dup2`하는 방식이었다면 쓸 수 없다.** CGI가 소켓에 평문을 직접 써서 TLS를 우회한다.
+
+### 동기화
+- **`SSL_CTX`**: main이 워커 생성 전에 한 번 설정하고, 이후에는 읽기만 한다.
+  OpenSSL 1.1.0 이상은 CTX 안의 공유 상태(세션 캐시, 참조 카운트)를 스스로 락으로 보호하므로,
+  여러 워커가 동시에 `SSL_new`해도 된다. 해제는 모든 워커를 join한 뒤에 한다.
+- **`SSL`**: 연결 하나에 하나이고, 그 연결을 맡은 워커만 쓴다. 락이 필요 없다.
+  `test_many_connections_independent`(동시 16연결 × 20왕복)와 `tls.sh`(동시 HTTPS 50개, 각자 다른 응답)가
+  섞이지 않음을 확인한다.
+- **OpenSSL 오류 큐**는 스레드별이다.
+
+### 검증
+- **단위 테스트**: 인증서는 테스트 안에서 OpenSSL API로 생성한다. 외부 파일에 의존하지 않고, 짝이 아닌 키도 함께 만든다.
+  - `test_tls`
+    - CTX 오류 5종(파일 없음, 짝 불일치, 깨진 PEM, 자리 바뀜)
+    - 핸드셰이크 성공 후 blocking으로 복구되는지
+    - close_notify 수신
+    - TLS 1.1 거부, 평문 HTTP 감지, 쓰레기 바이트, 즉시 EOF
+    - 침묵 클라이언트 마감, 종료 플래그
+  - `test_connio`
+    - 평문 경로가 기존과 같은지
+    - 3MB 부분 쓰기
+    - `SSL_pending`
+    - 정상 종료와 비정상 종료
+    - 떠난 상대에게 쓰기(SIGPIPE)
+    - 동시 16연결
+- **기능 테스트** `tls.sh`(39개):
+  - curl `-k` / `--cacert` / 검증 실패(exit 60), `openssl s_client`
+  - TLS 1.1 거부, 평문·쓰레기·핸드셰이크 중 끊기 뒤에도 서버 생존
+  - HTTPS로 정적 5MB, CGI echo 200KB, 리버스 프록시
+  - 동시 50개, fd 개수가 처음 값으로 돌아오는지
+  - 시작 시 인증서 오류 거부
+- **메모리 검사**:
+  - ASan + UBSan으로 단위·기능 테스트 전체를 돌렸다.
+  - macOS `leaks`: HTTPS 트래픽 포함 0 leaks.
+  - Linux LSan, valgrind(CI).

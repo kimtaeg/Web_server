@@ -91,7 +91,7 @@ const route_t *router_match(const router_t *r, const char *host, size_t host_len
     return best;
 }
 
-int router_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int router_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res)
 {
     const router_t *r = ctx;
@@ -100,13 +100,13 @@ int router_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     const route_t *rt;
 
     if (req->is_absolute && r->absolute != NULL)
-        return r->absolute(r->absolute_ctx, fd, req, ci, keep_alive, res);
+        return r->absolute(r->absolute_ctx, cl, req, ci, keep_alive, res);
     if (host == NULL && req->is_absolute) { /* absolute-form 이면 authority 가 Host 역할 */
         host = req->authority;
         hl = req->authority_len;
     }
     rt = router_match(r, host, hl, req->path, req->path_len);
     if (rt != NULL)
-        return rt->fn(rt->ctx, fd, req, ci, keep_alive, res);
-    return r->fallback(r->fallback_ctx, fd, req, ci, keep_alive, res);
+        return rt->fn(rt->ctx, cl, req, ci, keep_alive, res);
+    return r->fallback(r->fallback_ctx, cl, req, ci, keep_alive, res);
 }

@@ -102,7 +102,7 @@ static void test_status_page_send(void)
     ssize_t got;
 
     REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-    CHECK_EQ_INT(http_response_status_page(sv[0], 405, 0, 0, "Allow: GET, HEAD\r\n", &sent), 0);
+    CHECK_EQ_INT(http_response_status_page(&(conn_t){sv[0], NULL, 0}, 405, 0, 0, "Allow: GET, HEAD\r\n", &sent), 0);
     got = recv_some(sv[1], buf, sizeof buf - 1, 1000);
     REQUIRE(got > 0);
     buf[got] = '\0';

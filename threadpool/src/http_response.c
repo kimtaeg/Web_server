@@ -100,7 +100,7 @@ int http_response_build_status_page(buf_t *out, int status, int keep_alive, int 
     return buf_append(out, body, (size_t)blen);
 }
 
-int http_response_status_page(int fd, int status, int keep_alive, int head_only,
+int http_response_status_page(conn_t *cl, int status, int keep_alive, int head_only,
                               const char *extra_headers, size_t *sent)
 {
     buf_t b;
@@ -111,7 +111,7 @@ int http_response_status_page(int fd, int status, int keep_alive, int head_only,
         goto cleanup;
     if (http_response_build_status_page(&b, status, keep_alive, head_only, extra_headers) != BUF_OK)
         goto cleanup;
-    if (send_all(fd, b.data, b.len) < 0)
+    if (conn_write(cl, b.data, b.len) < 0)
         goto cleanup;
     *sent = b.len;
     rc = 0;

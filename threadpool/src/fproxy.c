@@ -200,10 +200,10 @@ done:
 /* 핸들러                                                              */
 /* ------------------------------------------------------------------ */
 
-static int reply(int fd, int status, int ka, int head, const char *extra, handler_result_t *res)
+static int reply(conn_t *cl, int status, int ka, int head, const char *extra, handler_result_t *res)
 {
     size_t sent = 0;
-    int rc = http_response_status_page(fd, status, ka, head, extra, &sent);
+    int rc = http_response_status_page(cl, status, ka, head, extra, &sent);
 
     res->status = status;
     res->bytes = sent;
@@ -211,7 +211,7 @@ static int reply(int fd, int status, int ka, int head, const char *extra, handle
 }
 
 /* 캐시 HIT 응답: 저장된 head + X-Cache/Connection + (HEAD 가 아니면) 본문. send 한 번. */
-static int serve_hit(int fd, const http_request_t *req, const buf_t *blob, size_t head_len, int ka,
+static int serve_hit(conn_t *cl, const http_request_t *req, const buf_t *blob, size_t head_len, int ka,
                      handler_result_t *res)
 {
     buf_t out;
@@ -224,10 +224,10 @@ static int serve_hit(int fd, const http_request_t *req, const buf_t *blob, size_
         (req->method != HTTP_HEAD &&
          buf_append(&out, blob->data + head_len, blob->len - head_len) != BUF_OK)) {
         buf_free(&out);
-        return reply(fd, 500, ka, req->method == HTTP_HEAD, NULL, res);
+        return reply(cl, 500, ka, req->method == HTTP_HEAD, NULL, res);
     }
     res->status = 200;
-    if (send_all(fd, out.data, out.len) < 0)
+    if (conn_write(cl, out.data, out.len) < 0)
         rc = -1;
     res->bytes = out.len;
     buf_free(&out);
@@ -262,7 +262,7 @@ static int connect_any(const char *host, int port, int timeout_ms)
     return fd;
 }
 
-int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int fproxy_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res)
 {
     const fproxy_ctx_t *f = ctx;
@@ -286,19 +286,19 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     memset(&cap, 0, sizeof cap);
 
     if (req->is_https) {
-        rc = reply(fd, 501, keep_alive, is_head, NULL, res); /* TLS 터널링 미지원 */
+        rc = reply(cl, 501, keep_alive, is_head, NULL, res); /* TLS 터널링 미지원 */
         goto cleanup;
     }
     if (upstream_request_has_our_via(req)) {
         log_msg(LOG_WARN, "fproxy: 프록시 루프 감지 (Via 에 자기 표식) → 508");
-        rc = reply(fd, 508, 0, is_head, NULL, res);
+        rc = reply(cl, 508, 0, is_head, NULL, res);
         res->close = 1;
         goto cleanup;
     }
     klen = fproxy_cache_key(req, key, sizeof key);
     if (klen < 0 ||
         fproxy_split_authority(req->authority, req->authority_len, host, sizeof host, &port) != 0) {
-        rc = reply(fd, 400, keep_alive, is_head, NULL, res);
+        rc = reply(cl, 400, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     use_cache = f->cache != NULL && (req->method == HTTP_GET || req->method == HTTP_HEAD) &&
@@ -311,7 +311,7 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         size_t head_len = 0;
 
         if (cache_get(f->cache, key, (size_t)klen, now_ms(), &blob, &head_len) == CACHE_HIT) {
-            rc = serve_hit(fd, req, &blob, head_len, keep_alive, res);
+            rc = serve_hit(cl, req, &blob, head_len, keep_alive, res);
             goto cleanup;
         }
     }
@@ -320,9 +320,9 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     ufd = connect_any(host, port, f->connect_timeout_ms);
     if (ufd < 0) {
         if (ufd == UPSTREAM_ELOCAL) /* 우리 쪽 임시 포트/fd 고갈 → 잠시 후 재시도 안내 */
-            rc = reply(fd, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
+            rc = reply(cl, 503, keep_alive, is_head, "Retry-After: 1\r\n", res);
         else
-            rc = reply(fd, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, miss, res);
+            rc = reply(cl, ufd == UPSTREAM_ETIMEOUT ? 504 : 502, keep_alive, is_head, miss, res);
         goto cleanup;
     }
 
@@ -330,12 +330,12 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     buf_appendf(&tgt, "%.*s%s%.*s", (int)req->path_len, req->path, req->query ? "?" : "",
                 (int)req->query_len, req->query ? req->query : "");
     if (upstream_build_request(&out, req, tgt.data, tgt.len, NULL, ci ? ci->ip : NULL) != BUF_OK) {
-        rc = reply(fd, 500, keep_alive, is_head, NULL, res);
+        rc = reply(cl, 500, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
     (void)netio_set_send_timeout(ufd, f->read_timeout_ms);
     if (send_all(ufd, out.data, out.len) < 0) {
-        rc = reply(fd, 502, keep_alive, is_head, NULL, res);
+        rc = reply(cl, 502, keep_alive, is_head, NULL, res);
         goto cleanup;
     }
 
@@ -344,7 +344,7 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         buf_init(&cap.head, 1024, UPSTREAM_MAX_HEAD);
         buf_init(&cap.body, 0, 64 * 1024 * 1024); /* 실제 상한은 캐시의 max_object 가 거른다 */
     }
-    relay = upstream_relay(ufd, fd, req, keep_alive, f->read_timeout_ms, miss,
+    relay = upstream_relay(ufd, cl, req, keep_alive, f->read_timeout_ms, miss,
                            (use_cache && req->method == HTTP_GET) ? &cap : NULL, &ur);
     switch (relay) {
     case UPSTREAM_OK:
@@ -353,10 +353,10 @@ int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         res->close = !ur.client_keep_alive;
         break;
     case UPSTREAM_ETIMEOUT:
-        rc = reply(fd, 504, keep_alive, is_head, NULL, res);
+        rc = reply(cl, 504, keep_alive, is_head, NULL, res);
         break;
     case UPSTREAM_EBAD:
-        rc = reply(fd, 502, keep_alive, is_head, NULL, res);
+        rc = reply(cl, 502, keep_alive, is_head, NULL, res);
         break;
     default:
         res->status = ur.status;

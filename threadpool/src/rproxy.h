@@ -56,7 +56,7 @@ int rproxy_pick(rproxy_pool_t *p, long long now_ms, int exclude);
 void rproxy_mark_down(rproxy_pool_t *p, size_t i, long long now_ms);
 
 /* conn_handler_fn. ctx 는 rproxy_pool_t*. */
-int rproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int rproxy_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res);
 
 #endif /* RPROXY_H */

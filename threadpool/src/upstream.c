@@ -378,7 +378,7 @@ static void capture_body(upstream_capture_t *cap, const char *p, size_t n)
         cap->overflow = 1;
 }
 
-int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_alive,
+int upstream_relay(int ufd, conn_t *cl, const http_request_t *req, int client_keep_alive,
                    int read_timeout_ms, const char *extra_headers, upstream_capture_t *cap,
                    upstream_result_t *res)
 {
@@ -467,7 +467,7 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
 
     res->status = r.status;
     res->client_keep_alive = ka;
-    if (send_all(cfd, head.data, head.len) < 0) {
+    if (conn_write(cl, head.data, head.len) < 0) {
         rc = UPSTREAM_ECLIENT;
         goto cleanup;
     }
@@ -484,7 +484,7 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
         have = left; /* CL 을 넘는 여분은 버린다 */
     if (have > 0) {
         capture_body(cap, in.data + r.head_len, have);
-        if (send_all(cfd, in.data + r.head_len, have) < 0) {
+        if (conn_write(cl, in.data + r.head_len, have) < 0) {
             rc = UPSTREAM_ECLIENT;
             goto cleanup;
         }
@@ -509,7 +509,7 @@ int upstream_relay(int ufd, int cfd, const http_request_t *req, int client_keep_
         if (n <= 0) /* 타임아웃, 오류, CL 을 채우기 전 EOF → 클라이언트에겐 잘린 응답 */
             break;
         capture_body(cap, tmp, (size_t)n);
-        if (send_all(cfd, tmp, (size_t)n) < 0) {
+        if (conn_write(cl, tmp, (size_t)n) < 0) {
             rc = UPSTREAM_ECLIENT;
             break;
         }

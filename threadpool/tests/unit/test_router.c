@@ -6,7 +6,7 @@
 #include "http_parser.h"
 #include "router.h"
 
-static int h_a(void *c, int fd, const http_request_t *r, const conn_info_t *ci, int ka,
+static int h_a(void *c, conn_t *fd, const http_request_t *r, const conn_info_t *ci, int ka,
                handler_result_t *res)
 {
     (void)c; (void)fd; (void)r; (void)ci; (void)ka;
@@ -14,7 +14,7 @@ static int h_a(void *c, int fd, const http_request_t *r, const conn_info_t *ci, 
     return 0;
 }
 
-static int h_b(void *c, int fd, const http_request_t *r, const conn_info_t *ci, int ka,
+static int h_b(void *c, conn_t *fd, const http_request_t *r, const conn_info_t *ci, int ka,
                handler_result_t *res)
 {
     (void)c; (void)fd; (void)r; (void)ci; (void)ka;
@@ -22,7 +22,7 @@ static int h_b(void *c, int fd, const http_request_t *r, const conn_info_t *ci, 
     return 0;
 }
 
-static int h_c(void *c, int fd, const http_request_t *r, const conn_info_t *ci, int ka,
+static int h_c(void *c, conn_t *fd, const http_request_t *r, const conn_info_t *ci, int ka,
                handler_result_t *res)
 {
     (void)c; (void)fd; (void)r; (void)ci; (void)ka;
@@ -30,7 +30,7 @@ static int h_c(void *c, int fd, const http_request_t *r, const conn_info_t *ci, 
     return 0;
 }
 
-static int h_d(void *c, int fd, const http_request_t *r, const conn_info_t *ci, int ka,
+static int h_d(void *c, conn_t *fd, const http_request_t *r, const conn_info_t *ci, int ka,
                handler_result_t *res)
 {
     (void)c; (void)fd; (void)r; (void)ci; (void)ka;
@@ -38,7 +38,7 @@ static int h_d(void *c, int fd, const http_request_t *r, const conn_info_t *ci, 
     return 0;
 }
 
-static int h_fallback(void *c, int fd, const http_request_t *r, const conn_info_t *ci, int ka,
+static int h_fallback(void *c, conn_t *fd, const http_request_t *r, const conn_info_t *ci, int ka,
                       handler_result_t *res)
 {
     (void)c; (void)fd; (void)r; (void)ci; (void)ka;
@@ -56,7 +56,7 @@ static int dispatch(router_t *rt, const char *path)
     memset(&res, 0, sizeof res);
     req.path = path;
     req.path_len = strlen(path);
-    router_handle(rt, -1, &req, &ci, 1, &res);
+    router_handle(rt, NULL, &req, &ci, 1, &res);
     return res.status;
 }
 
@@ -128,7 +128,7 @@ static int dispatch_host(router_t *rt, const char *host, const char *path)
     if (http_parse(&p, raw, strlen(raw), &req, &used) != PARSE_OK)
         return -1;
     memset(&res, 0, sizeof res);
-    router_handle(rt, -1, &req, &ci, 1, &res);
+    router_handle(rt, NULL, &req, &ci, 1, &res);
     return res.status;
 }
 

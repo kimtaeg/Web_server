@@ -55,7 +55,7 @@ int fproxy_cacheable(const http_request_t *req, const char *head, size_t head_le
                      long long default_ttl_ms, long long *ttl_ms);
 
 /* conn_handler_fn. ctx 는 fproxy_ctx_t*. */
-int fproxy_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int fproxy_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res);
 
 #endif /* FPROXY_H */

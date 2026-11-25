@@ -21,6 +21,7 @@
 #include "server.h"
 #include "static.h"
 #include "threadpool.h"
+#include "tls.h"
 #include "upstream.h"
 
 /*
@@ -40,7 +41,7 @@ static void usage(const char *prog)
     fprintf(stderr,
             "사용법: %s [-f config] [-H host] [-p port] [-r root] [-w workers] [-q queue]\n"
             "          [-t idle_timeout_ms] [-m max_requests] [-g cgi_dir] [-c cgi_timeout_ms]\n"
-            "          [-n|--name 백엔드이름] [-v]\n"
+            "          [-n|--name 백엔드이름] [-C cert.pem -K key.pem [-s https_port]] [-v]\n"
             "  -f  설정 파일 (route 등). 명령줄 옵션이 설정 파일보다 우선\n"
             "  -H  바인드 주소 (기본 0.0.0.0)\n"
             "  -p  포트 (기본 8080)\n"
@@ -53,6 +54,9 @@ static void usage(const char *prog)
             "  -g  CGI 디렉터리: /cgi-bin/<이름> 을 여기서 실행 (없으면 CGI 비활성)\n"
             "  -c  CGI 타임아웃 ms (기본 5000, 초과 시 504)\n"
             "  -n  백엔드 모드: 모든 응답에 'X-Backend: <이름>' (로드밸런싱 확인용)\n"
+            "  -C  TLS 인증서(PEM). -K 와 함께 주면 HTTPS 를 같은 주소의 -s 포트에서 추가로 연다\n"
+            "  -K  TLS 개인키(PEM)\n"
+            "  -s  HTTPS 포트 (기본 8443)\n"
             "  -v  디버그 로그\n",
             prog);
 }
@@ -113,9 +117,10 @@ static int extract_long_name(int argc, char **argv, char **out, const char **nam
 
 /* 명령줄에서 받은 값. set_* 가 1 인 것만 설정 파일 값을 덮어쓴다. */
 typedef struct {
-    const char *config_path, *host, *root, *cgi_dir, *name;
-    long port, workers, queue, idle, hdr, maxreq, cgi_ms;
-    int set_port, set_workers, set_queue, set_idle, set_hdr, set_maxreq, set_cgi_ms, verbose;
+    const char *config_path, *host, *root, *cgi_dir, *name, *tls_cert, *tls_key;
+    long port, workers, queue, idle, hdr, maxreq, cgi_ms, https_port;
+    int set_port, set_workers, set_queue, set_idle, set_hdr, set_maxreq, set_cgi_ms, set_https_port;
+    int verbose;
 } cli_t;
 
 static void apply_cli(config_t *c, const cli_t *o)
@@ -142,6 +147,12 @@ static void apply_cli(config_t *c, const cli_t *o)
         c->max_requests = o->maxreq;
     if (o->set_cgi_ms)
         c->cgi_timeout_ms = o->cgi_ms;
+    if (o->tls_cert)
+        snprintf(c->tls_cert, sizeof c->tls_cert, "%s", o->tls_cert);
+    if (o->tls_key)
+        snprintf(c->tls_key, sizeof c->tls_key, "%s", o->tls_key);
+    if (o->set_https_port)
+        c->https_port = o->https_port;
 }
 
 int main(int argc, char **argv)
@@ -164,6 +175,10 @@ int main(int argc, char **argv)
     int nargs;
     int opt;
     int lfd = -1;
+    int tls_lfd = -1;
+    struct ssl_ctx_st *tls_ctx = NULL;
+    server_listener_t ls[2];
+    size_t nls = 0;
     int rc = 1;
     size_t i;
     threadpool_t *tp = NULL;
@@ -180,7 +195,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    while ((opt = getopt(nargs, args, "f:H:p:r:w:q:t:T:m:g:c:n:vh")) != -1) {
+    while ((opt = getopt(nargs, args, "f:H:p:r:w:q:t:T:m:g:c:n:C:K:s:vh")) != -1) {
         int bad = 0;
 
         switch (opt) {
@@ -189,6 +204,9 @@ int main(int argc, char **argv)
         case 'r': cli.root = optarg; break;
         case 'g': cli.cgi_dir = optarg; break;
         case 'n': cli.name = optarg; break;
+        case 'C': cli.tls_cert = optarg; break;
+        case 'K': cli.tls_key = optarg; break;
+        case 's': bad = parse_long(optarg, 1, 65535, &cli.https_port); cli.set_https_port = 1; break;
         case 'p': bad = parse_long(optarg, 1, 65535, &cli.port); cli.set_port = 1; break;
         case 'w': bad = parse_long(optarg, 1, 1024, &cli.workers); cli.set_workers = 1; break;
         case 'q': bad = parse_long(optarg, 1, 65536, &cli.queue); cli.set_queue = 1; break;
@@ -283,9 +301,39 @@ int main(int argc, char **argv)
     }
     log_msg(LOG_INFO, "Via 표식: %s", via);
 
+    /*
+     * HTTPS: 인증서와 개인키가 둘 다 있을 때만. 하나만 있으면 설정 실수이므로 시작하지 않는다.
+     * SSL_CTX 는 워커를 만들기 전에 여기서 한 번 만들고, 이후 워커들은 읽기만 한다 (tls.h).
+     * 인증서·키를 읽지 못하거나 짝이 맞지 않으면 시작을 거부한다 (매 연결마다 실패하는 서버보다 낫다).
+     */
+    if ((cfg.tls_cert[0] != '\0') != (cfg.tls_key[0] != '\0')) {
+        log_msg(LOG_ERROR, "HTTPS 는 인증서(-C/tls_cert)와 개인키(-K/tls_key)가 둘 다 필요하다");
+        goto cleanup;
+    }
+    if (cfg.tls_cert[0] != '\0') {
+        if (cfg.https_port == cfg.listen_port) {
+            log_msg(LOG_ERROR, "HTTP 와 HTTPS 포트가 같다: %d", cfg.listen_port);
+            goto cleanup;
+        }
+        tls_ctx = tls_ctx_create(cfg.tls_cert, cfg.tls_key);
+        if (tls_ctx == NULL)
+            goto cleanup; /* 원인은 tls_ctx_create 가 로그로 남겼다 */
+    }
+
     lfd = server_listen(cfg.listen_host, cfg.listen_port, 128);
     if (lfd < 0)
         goto cleanup; /* 원인은 server_listen 이 이미 로그로 남겼다 */
+    ls[nls].fd = lfd;
+    ls[nls].tls = 0;
+    nls++;
+    if (tls_ctx != NULL) {
+        tls_lfd = server_listen(cfg.listen_host, (int)cfg.https_port, 128);
+        if (tls_lfd < 0)
+            goto cleanup;
+        ls[nls].fd = tls_lfd;
+        ls[nls].tls = 1;
+        nls++;
+    }
 
     memset(&ccfg, 0, sizeof ccfg);
     ccfg.limits = default_limits;
@@ -296,6 +344,7 @@ int main(int argc, char **argv)
     ccfg.handler = router_handle;
     ccfg.handler_ctx = &router;
     ccfg.stop = &g_stop;
+    ccfg.tls_ctx = tls_ctx;
 
     tp = threadpool_create((size_t)cfg.workers, (size_t)cfg.queue, conn_worker, &ccfg);
     if (tp == NULL) {
@@ -306,7 +355,10 @@ int main(int argc, char **argv)
     log_msg(LOG_INFO, "listening on http://%s:%d  root=%s  workers=%ld queue=%ld idle=%ldms%s%s",
             cfg.listen_host, cfg.listen_port, sctx.root, cfg.workers, cfg.queue,
             cfg.idle_timeout_ms, cli.name ? "  backend-name=" : "", cli.name ? cli.name : "");
-    rc = server_run(lfd, tp, &g_stop) == 0 ? 0 : 1;
+    if (tls_ctx != NULL)
+        log_msg(LOG_INFO, "listening on https://%s:%ld  cert=%s  (TLS 1.2+)", cfg.listen_host,
+                cfg.https_port, cfg.tls_cert);
+    rc = server_run(ls, nls, tp, &g_stop) == 0 ? 0 : 1;
     log_msg(LOG_INFO, "종료 시작 (signal)");
 
 cleanup:
@@ -320,8 +372,11 @@ cleanup:
      * 4. join              : 모든 워커가 끝날 때까지 기다린다. 이후로는 공유 자원을 쓰는 스레드가 없다.
      * 5. 자원 해제         : 그래서 이 시점에만 풀·큐·동기화 객체를 안전하게 free 할 수 있다.
      */
-    if (lfd >= 0) {
-        close(lfd);
+    if (lfd >= 0 || tls_lfd >= 0) {
+        if (lfd >= 0)
+            close(lfd);
+        if (tls_lfd >= 0)
+            close(tls_lfd);
         log_msg(LOG_INFO, "종료 1/4: 리슨 소켓 닫음");
     }
     if (tp != NULL) {
@@ -339,6 +394,8 @@ cleanup:
                 st.hits, st.misses, st.stores, st.evictions, st.entries, st.bytes);
         cache_destroy(cache);
     }
+    /* SSL_CTX 도 워커가 모두 끝난 뒤에만 해제 (연결별 SSL 이 CTX 를 참조하므로) */
+    tls_ctx_free(tls_ctx);
     log_msg(LOG_INFO, "종료 4/4: %s", rc == 0 ? "정상 종료" : "오류로 종료");
     return rc;
 }

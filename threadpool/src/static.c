@@ -208,18 +208,18 @@ static int resolve(const static_ctx_t *s, const http_request_t *req, char real[P
     return 200;
 }
 
-static int send_status(int fd, int status, int ka, int head, const buf_t *extra,
+static int send_status(conn_t *cl, int status, int ka, int head, const buf_t *extra,
                        handler_result_t *res)
 {
     size_t sent = 0;
-    int rc = http_response_status_page(fd, status, ka, head, extra->len ? extra->data : NULL, &sent);
+    int rc = http_response_status_page(cl, status, ka, head, extra->len ? extra->data : NULL, &sent);
 
     res->status = status;
     res->bytes = sent;
     return rc;
 }
 
-int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_t *ci,
+int static_handle(void *ctx, conn_t *cl, const http_request_t *req, const conn_info_t *ci,
                   int keep_alive, handler_result_t *res)
 {
     const static_ctx_t *s = ctx;
@@ -251,14 +251,14 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
             status = 403;
     }
     if (status != 200) {
-        rc = send_status(fd, status, keep_alive, is_head, &extra, res);
+        rc = send_status(cl, status, keep_alive, is_head, &extra, res);
         goto cleanup;
     }
 
     remaining = (size_t)st.st_size;
     if (http_response_head(&head, 200, mime_type_for_path(real), remaining, keep_alive, NULL) !=
         BUF_OK) {
-        rc = send_status(fd, 500, keep_alive, is_head, &extra, res);
+        rc = send_status(cl, 500, keep_alive, is_head, &extra, res);
         goto cleanup;
     }
     res->status = 200;
@@ -273,7 +273,7 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
 
         io = malloc(STATIC_IO_BUF);
         if (io == NULL) {
-            rc = send_status(fd, 500, keep_alive, is_head, &extra, res);
+            rc = send_status(cl, 500, keep_alive, is_head, &extra, res);
             goto cleanup;
         }
         do {
@@ -282,12 +282,12 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
         if (r <= 0 || buf_append(&head, io, (size_t)r) != BUF_OK) {
             /* 아직 아무것도 안 보냈으므로 오류 응답을 보낼 수 있다 */
             buf_reset(&head);
-            rc = send_status(fd, 500, keep_alive, is_head, &extra, res);
+            rc = send_status(cl, 500, keep_alive, is_head, &extra, res);
             goto cleanup;
         }
         remaining -= (size_t)r;
     }
-    if (send_all(fd, head.data, head.len) < 0) {
+    if (conn_write(cl, head.data, head.len) < 0) {
         rc = -1;
         goto cleanup;
     }
@@ -295,7 +295,7 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
     if (is_head)
         goto cleanup;
 
-    /* 나머지는 고정 버퍼로 read → send_all 반복: 파일 크기와 무관하게 메모리 사용이 일정하다. */
+    /* 나머지는 고정 버퍼로 read → conn_write 반복: 파일 크기와 무관하게 메모리 사용이 일정하다. */
     while (remaining > 0) {
         size_t want = remaining < STATIC_IO_BUF ? remaining : STATIC_IO_BUF;
         ssize_t r = read(file, io, want);
@@ -307,7 +307,7 @@ int static_handle(void *ctx, int fd, const http_request_t *req, const conn_info_
             res->close = 1;
             break;
         }
-        if (send_all(fd, io, (size_t)r) < 0) {
+        if (conn_write(cl, io, (size_t)r) < 0) {
             rc = -1;
             break;
         }
