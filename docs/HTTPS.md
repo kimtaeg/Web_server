@@ -201,7 +201,11 @@ curl -k https://localhost:8443/index.html
 - 8443: 일반적인 TLS 설정에서는 ClientHello의 SNI 등 일부 메타데이터가 평문으로 보일 수 있지만, 핸드셰이크 이후의 HTTP 요청·응답 내용은 읽을 수 없습니다.
   IP, 포트, 접속 시각, 트래픽 크기도 여전히 보입니다(3-3 "메타데이터").
 
-<!-- TODO: 캡처 이미지 / Wireshark 화면 -->
+![8080: 요청줄·헤더·HTML이 그대로 보임](images/https-capture-8080.png)
+
+![8443: 암호문만 보이고 SNI(localhost)만 평문](images/https-capture-8443.png)
+
+> 캡처 방법: `tcpdump`는 root 권한이 필요해, curl과 서버 사이에 바이트를 그대로 넘기며 기록하는 중계 소켓을 두고 같은 요청을 보냈습니다. 화면에 보이는 것은 실제로 오간 바이트이며, 인쇄할 수 없는 문자는 `tcpdump -A`처럼 `.`으로 표시했습니다.
 
 ### 3-2. 인증서 검증: 자물쇠는 "검증했을 때만" 의미가 있다
 
@@ -211,6 +215,10 @@ curl -k https://localhost:8443/       # 검증 생략 → 성공 (암호화는 �
 curl --cacert certs/server.crt https://localhost:8443/   # 이 인증서를 신뢰 → 성공
 curl http://localhost:8443/           # HTTPS 포트에 평문 → 400 (서버는 계속 동작)
 ```
+
+브라우저로 `https://localhost:8443/`에 접속하면 같은 이유로 경고가 뜹니다. 암호화는 되지만, 이 인증서를 보증하는 CA가 없어 인증을 통과하지 못한 것입니다(`NET::ERR_CERT_AUTHORITY_INVALID`).
+
+![자체 서명 인증서에 대한 Chrome 경고](images/https-browser-warning.png)
 
 → `-k`는 **암호화는 하지만 인증은 포기**한 상태입니다. 중간자가 자기 인증서를 내밀어도 그대로 접속됩니다.
 
