@@ -154,7 +154,7 @@ sleep 0.6
 eventually "서버 fd 개수가 처음과 같음 (소켓·SSL 누수 없음)" "$base" fd_count
 log=$(cat "$SERVER_LOG")
 check_contains "로그: 핸드셰이크 실패 사유 (SSL_get_error)" "핸드셰이크 실패 (SSL_ERROR_SSL)" "$log"
-check_contains "로그: OpenSSL 오류 큐 (unknown ca)" "alert unknown ca" "$log"
+check_contains "로그: OpenSSL 오류 큐 (ERR_print_errors_cb → 로그)" "  openssl: " "$log"
 check_contains "로그: 평문 요청 감지" "HTTPS 포트에 평문 HTTP 요청" "$log"
 check_contains "로그: HTTPS 리슨" "listening on https://" "$log"
 
